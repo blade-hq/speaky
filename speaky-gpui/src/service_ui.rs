@@ -7,12 +7,7 @@ pub struct ServiceInput {
 type EditResult = tokio::sync::oneshot::Receiver<Result<Option<ServiceInput>, String>>;
 
 #[cfg(target_os = "macos")]
-pub use macos::edit;
-
-#[cfg(not(target_os = "macos"))]
-pub fn edit(_: &mut gpui::Window, _: &str, _: &str) -> Result<EditResult, String> {
-    Err("识别服务编辑器当前仅支持 macOS。".into())
-}
+pub use macos::edit_model;
 
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
@@ -27,10 +22,11 @@ mod macos {
     const UTF8: usize = 4;
     const SAVE: isize = 1000;
 
-    pub fn edit(
+    pub fn edit_model(
         window: &mut gpui::Window,
         base_url: &str,
         model: &str,
+        organizer: bool,
     ) -> Result<EditResult, String> {
         let raw_handle =
             HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
@@ -65,7 +61,12 @@ mod macos {
                 "https://api.example.com/v1",
                 false,
             );
-            let model_field = add_field(*form, 70., "模型 ID", model, "sensevoice-small", false);
+            let example = if organizer {
+                "gpt-4o-mini"
+            } else {
+                "sensevoice-small"
+            };
+            let model_field = add_field(*form, 70., "模型 ID", model, example, false);
             let key_field = add_field(
                 *form,
                 14.,
@@ -74,9 +75,14 @@ mod macos {
                 "同一服务地址可留空沿用原密钥",
                 true,
             );
-            let _: () = msg_send![*alert, setMessageText: ns_string("编辑识别服务")];
+            let title = if organizer {
+                "编辑整理模型"
+            } else {
+                "编辑识别服务"
+            };
+            let _: () = msg_send![*alert, setMessageText: ns_string(title)];
             let help = ns_string(
-                "填写 OpenAI 兼容服务的基础地址和模型 ID。\n同一服务地址可留空沿用原密钥；更换服务器请填入该服务器的密钥。无鉴权的内网服务可填 EMPTY。",
+                "填写 OpenAI 兼容服务的基础地址和模型 ID。\n同一服务器可留空沿用原密钥。更换服务器请填入该服务器的密钥，无鉴权服务可填 EMPTY。",
             );
             let _: () = msg_send![*alert, setInformativeText: help];
             let _: () = msg_send![*alert, setAccessoryView: *form];

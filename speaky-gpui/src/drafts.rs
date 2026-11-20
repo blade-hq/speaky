@@ -10,6 +10,16 @@ pub struct Entry {
     pub modified: Option<SystemTime>,
     pub duration_seconds: u64,
     pub state: State,
+    pub organized: Option<Organized>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Organized {
+    pub source: String,
+    pub text: String,
+    pub base_url: String,
+    pub model: String,
+    pub profile: Option<crate::polish::Profile>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -41,6 +51,11 @@ pub fn save(path: &Path, audio: &[u8]) -> io::Result<()> {
 pub fn set_state(path: &Path, state: State) -> io::Result<()> {
     let metadata = serde_json::to_vec(&state).map_err(io::Error::other)?;
     write_atomically(&path.with_extension("json"), &metadata)
+}
+
+pub fn save_organized(path: &Path, result: &Organized) -> io::Result<()> {
+    let metadata = serde_json::to_vec(result).map_err(io::Error::other)?;
+    write_atomically(&path.with_extension("polish.json"), &metadata)
 }
 
 pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -95,11 +110,15 @@ fn list_in(directory: &Path) -> Vec<Entry> {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                 .unwrap_or_default();
+            let organized = fs::read(path.with_extension("polish.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok());
             Entry {
                 path,
                 modified,
                 duration_seconds: (bytes - 44) / (16_000 * 2),
                 state,
+                organized,
             }
         })
         .collect()
@@ -108,6 +127,41 @@ fn list_in(directory: &Path) -> Vec<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn organized_text_survives_reload_and_preserves_source() {
+        let directory = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let path = directory.join("recording.wav");
+        let audio = [1; 48];
+        let state = State::Transcribed {
+            text: "嗯，周四开会".into(),
+        };
+        save(&path, &audio).unwrap();
+        set_state(&path, state.clone()).unwrap();
+        let result = Organized {
+            source: "嗯，周四开会".into(),
+            text: "周四开会。".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            model: "test-model".into(),
+            profile: None,
+        };
+        save_organized(&path, &result).unwrap();
+        let archive = list_in(&directory);
+        assert_eq!(archive[0].state, state);
+        assert_eq!(archive[0].organized.as_ref().unwrap().text, result.text);
+        assert_eq!(archive[0].organized.as_ref().unwrap().profile, None);
+        assert_eq!(fs::read(&path).unwrap(), audio);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reads_a_saved_builtin_profile() {
+        let result: Organized = serde_json::from_str(
+            r#"{"source":"原文","text":"整理稿","base_url":"http://localhost/v1","model":"test","profile":"Balanced"}"#,
+        )
+        .unwrap();
+        assert_eq!(result.profile, Some(crate::polish::Profile::Balanced));
+    }
 
     #[test]
     fn a_completed_snapshot_replaces_the_previous_one() {

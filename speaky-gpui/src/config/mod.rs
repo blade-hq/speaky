@@ -139,7 +139,19 @@ impl Default for LlmOpenAIConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub learn_preferences: bool,
+    #[serde(default)]
+    pub custom_prompt: String,
+    #[serde(default)]
     pub openai: LlmOpenAIConfig,
+}
+
+impl LlmConfig {
+    pub fn learns_preferences(&self) -> bool {
+        self.enabled && self.learn_preferences && self.custom_prompt.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
