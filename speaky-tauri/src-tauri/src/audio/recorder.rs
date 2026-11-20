@@ -372,19 +372,33 @@ impl AudioRecorder {
             drop(stream);
         }
 
+        let wav_data = self.wav_snapshot();
+        if !wav_data.is_empty() {
+            info!("Recording stopped: {} bytes WAV", wav_data.len());
+        }
+        wav_data
+    }
+
+    pub fn wav_snapshot(&self) -> Vec<u8> {
         let frames = self.frames.lock().clone();
         if frames.is_empty() {
-            info!("Recording stopped, no frames captured");
             return Vec::new();
         }
+        self.create_wav(&frames)
+    }
 
-        let wav_data = self.create_wav(&frames);
-        info!(
-            "Recording stopped: {} frames, {} bytes WAV",
-            frames.len(),
-            wav_data.len()
-        );
-        wav_data
+    #[allow(dead_code)]
+    pub fn wav_preview_since(&self, cursor: usize) -> Option<(usize, Vec<u8>)> {
+        let frames = self.frames.lock();
+        let samples_per_second = SAMPLE_RATE as usize * CHANNELS as usize;
+        let available = frames.get(cursor..)?;
+        if available.len() < samples_per_second {
+            return None;
+        }
+        let count = available.len().min(4 * samples_per_second);
+        let samples = available[..count].to_vec();
+        drop(frames);
+        Some((cursor + count, self.create_wav(&samples)))
     }
 
     /// Check if currently recording
@@ -540,7 +554,25 @@ impl Drop for AudioRecorder {
 
 #[cfg(test)]
 mod tests {
-    use super::AreaResampler;
+    use super::{AreaResampler, AudioRecorder, SAMPLE_RATE};
+
+    #[test]
+    fn preview_snapshots_encode_bounded_audio_without_removing_it_from_the_recording() {
+        let recorder = AudioRecorder::new_with_name(None, None, 1.0).unwrap();
+        let second = SAMPLE_RATE as usize;
+        recorder.frames.lock().extend(vec![100; second - 1]);
+        assert!(recorder.wav_preview_since(0).is_none());
+
+        recorder.frames.lock().resize(5 * second, 200);
+        let (next, first) = recorder.wav_preview_since(0).unwrap();
+        let (end, second_chunk) = recorder.wav_preview_since(next).unwrap();
+        let full = recorder.wav_snapshot();
+        assert_eq!(next, 4 * second);
+        assert_eq!(end, 5 * second);
+        assert_eq!(&first[44..], &full[44..44 + 2 * next]);
+        assert_eq!(&second_chunk[44..], &full[44 + 2 * next..]);
+        assert!(recorder.wav_preview_since(end).is_none());
+    }
 
     #[test]
     fn resamples_48khz_to_16khz_without_changing_a_constant_signal() {
