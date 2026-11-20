@@ -5333,6 +5333,7 @@ dependencies = [
 name = "speaky-gpui"
 version = "0.1.0"
 dependencies = [
+ "block",
  "byteorder",
  "cpal",
  "dirs 5.0.1",
@@ -5341,8 +5342,10 @@ dependencies = [
  "futures-util",
  "gpui",
  "log",
+ "objc",
  "once_cell",
  "parking_lot",
+ "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",
