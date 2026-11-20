@@ -1,6 +1,53 @@
+use std::{cell::Cell, rc::Rc};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-pub const LABEL: &str = "⌥⇧Space";
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Shortcut {
+    #[default]
+    OptionShiftSpace,
+    ControlShiftSpace,
+    ControlShiftD,
+}
+
+impl Shortcut {
+    pub const ALL: [Self; 3] = [
+        Self::OptionShiftSpace,
+        Self::ControlShiftSpace,
+        Self::ControlShiftD,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OptionShiftSpace => "⌥⇧Space",
+            Self::ControlShiftSpace => "⌃⇧Space",
+            Self::ControlShiftD => "⌃⇧D",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::OptionShiftSpace => "option_shift_space",
+            Self::ControlShiftSpace => "control_shift_space",
+            Self::ControlShiftD => "control_shift_d",
+        }
+    }
+}
+
+pub struct HotkeyEvents {
+    events: UnboundedReceiver<u32>,
+    active_id: Rc<Cell<Option<u32>>>,
+}
+
+impl HotkeyEvents {
+    pub async fn recv(&mut self) -> Option<()> {
+        while let Some(id) = self.events.recv().await {
+            if self.active_id.get() == Some(id) {
+                return Some(());
+            }
+        }
+        None
+    }
+}
 
 #[cfg(target_os = "macos")]
 pub use macos::GlobalHotkey;
@@ -10,35 +57,49 @@ pub struct GlobalHotkey;
 
 #[cfg(not(target_os = "macos"))]
 impl GlobalHotkey {
-    pub fn register() -> Result<(Self, UnboundedReceiver<()>), String> {
+    pub fn register(_: Shortcut) -> Result<(Self, HotkeyEvents), String> {
+        Err("全局快捷键目前仅支持 macOS。".into())
+    }
+
+    pub fn change(
+        &mut self,
+        _: Shortcut,
+        _: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         Err("全局快捷键目前仅支持 macOS。".into())
     }
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::ffi::c_void;
     use std::ptr::null_mut;
+    use std::rc::Rc;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-    use super::{UnboundedReceiver, LABEL};
+    use super::{HotkeyEvents, Shortcut};
 
     const KEYBOARD_EVENT: u32 = u32::from_be_bytes(*b"keyb");
     const HOTKEY_RELEASED: u32 = 6;
     const SPACE: u32 = 0x31;
+    const ANSI_D: u32 = 0x02;
     const SHIFT: u32 = 1 << 9;
     const OPTION: u32 = 1 << 11;
+    const CONTROL: u32 = 1 << 12;
     const EXCLUSIVE: u32 = 1;
     const EVENT_NOT_HANDLED: i32 = -9874;
     const HOTKEY_EXISTS: i32 = -9878;
-    const HOTKEY_ID: EventHotkeyId = EventHotkeyId {
-        signature: u32::from_be_bytes(*b"Spky"),
-        id: 1,
-    };
+    const SIGNATURE: u32 = u32::from_be_bytes(*b"Spky");
 
     thread_local! {
-        static EVENTS: RefCell<Option<UnboundedSender<()>>> = const { RefCell::new(None) };
+        static EVENTS: RefCell<Option<EventListener>> = const { RefCell::new(None) };
+        static NEXT_ID: Cell<u32> = const { Cell::new(1) };
+    }
+
+    struct EventListener {
+        sender: UnboundedSender<u32>,
+        active_id: Rc<Cell<Option<u32>>>,
     }
 
     #[repr(C)]
@@ -89,20 +150,76 @@ mod macos {
         fn pthread_main_np() -> std::ffi::c_int;
     }
 
+    struct RegisteredKey {
+        shortcut: Shortcut,
+        id: u32,
+        registration: CarbonRef,
+    }
+
+    impl RegisteredKey {
+        fn register(shortcut: Shortcut, target: CarbonRef) -> Result<Self, String> {
+            let (key, modifiers) = match shortcut {
+                Shortcut::OptionShiftSpace => (SPACE, OPTION | SHIFT),
+                Shortcut::ControlShiftSpace => (SPACE, CONTROL | SHIFT),
+                Shortcut::ControlShiftD => (ANSI_D, CONTROL | SHIFT),
+            };
+            let id = NEXT_ID.with(|next| {
+                let id = next.get();
+                let following = id
+                    .checked_add(1)
+                    .ok_or_else(|| "全局快捷键注册次数已达到上限。".to_owned())?;
+                next.set(following);
+                Ok::<_, String>(id)
+            })?;
+            let mut registration = null_mut();
+            let status = unsafe {
+                RegisterEventHotKey(
+                    key,
+                    modifiers,
+                    EventHotkeyId {
+                        signature: SIGNATURE,
+                        id,
+                    },
+                    target,
+                    EXCLUSIVE,
+                    &mut registration,
+                )
+            };
+            let label = shortcut.label();
+            match status {
+                0 => Ok(Self {
+                    shortcut,
+                    id,
+                    registration,
+                }),
+                HOTKEY_EXISTS => Err(format!("{label} 已被其他应用占用。")),
+                _ => Err(format!("无法注册 {label}（macOS 状态码 {status}）。")),
+            }
+        }
+    }
+
+    impl Drop for RegisteredKey {
+        fn drop(&mut self) {
+            unsafe { UnregisterEventHotKey(self.registration) };
+        }
+    }
+
     pub struct GlobalHotkey {
-        key: CarbonRef,
+        key: RegisteredKey,
         handler: CarbonRef,
+        active_id: Rc<Cell<Option<u32>>>,
     }
 
     impl GlobalHotkey {
-        pub fn register() -> Result<(Self, UnboundedReceiver<()>), String> {
+        pub fn register(shortcut: Shortcut) -> Result<(Self, HotkeyEvents), String> {
             if unsafe { pthread_main_np() } == 0 {
                 return Err("请在 macOS 主线程注册全局快捷键。".into());
             }
             if EVENTS.with(|events| events.borrow().is_some()) {
-                return Err(format!("{LABEL} 已经注册。"));
+                return Err("已经安装全局快捷键监听。".into());
             }
             let target = unsafe { GetApplicationEventTarget() };
+            let key = RegisteredKey::register(shortcut, target)?;
             let event = EventType {
                 class: KEYBOARD_EVENT,
                 kind: HOTKEY_RELEASED,
@@ -115,38 +232,48 @@ mod macos {
                 return Err(format!("安装全局快捷键监听失败（macOS 状态码 {status}）。"));
             }
 
-            let mut key = null_mut();
-            let status = unsafe {
-                RegisterEventHotKey(
-                    SPACE,
-                    SHIFT | OPTION,
-                    HOTKEY_ID,
-                    target,
-                    EXCLUSIVE,
-                    &mut key,
-                )
-            };
-            if status != 0 {
-                unsafe { RemoveEventHandler(handler) };
-                return Err(if status == HOTKEY_EXISTS {
-                    format!("{LABEL} 已被其他应用占用。")
-                } else {
-                    format!("无法注册 {LABEL}（macOS 状态码 {status}）。")
-                });
-            }
-
+            let active_id = Rc::new(Cell::new(Some(key.id)));
             let (sender, receiver) = unbounded_channel();
-            EVENTS.with(|events| *events.borrow_mut() = Some(sender));
-            Ok((Self { key, handler }, receiver))
+            EVENTS.with(|events| {
+                *events.borrow_mut() = Some(EventListener {
+                    sender,
+                    active_id: active_id.clone(),
+                });
+            });
+            Ok((
+                Self {
+                    key,
+                    handler,
+                    active_id: active_id.clone(),
+                },
+                HotkeyEvents {
+                    events: receiver,
+                    active_id,
+                },
+            ))
+        }
+
+        pub fn change(
+            &mut self,
+            shortcut: Shortcut,
+            persist: impl FnOnce() -> Result<(), String>,
+        ) -> Result<(), String> {
+            if shortcut == self.key.shortcut {
+                return persist();
+            }
+            let target = unsafe { GetApplicationEventTarget() };
+            let key = RegisteredKey::register(shortcut, target)?;
+            persist()?;
+            self.active_id.set(Some(key.id));
+            self.key = key;
+            Ok(())
         }
     }
 
     impl Drop for GlobalHotkey {
         fn drop(&mut self) {
-            unsafe {
-                UnregisterEventHotKey(self.key);
-                RemoveEventHandler(self.handler);
-            }
+            self.active_id.set(None);
+            unsafe { RemoveEventHandler(self.handler) };
             let _ = EVENTS.try_with(|events| events.borrow_mut().take());
         }
     }
@@ -167,14 +294,21 @@ mod macos {
                 (&mut id as *mut EventHotkeyId).cast(),
             )
         };
-        if status != 0 || id != HOTKEY_ID {
+        if status != 0 || id.signature != SIGNATURE {
             return EVENT_NOT_HANDLED;
         }
-        let _ = EVENTS.try_with(|events| {
-            if let Some(sender) = events.borrow().as_ref() {
-                let _ = sender.send(());
-            }
-        });
-        0
+        EVENTS
+            .try_with(|events| {
+                let events = events.borrow();
+                let Some(listener) = events.as_ref() else {
+                    return EVENT_NOT_HANDLED;
+                };
+                if listener.active_id.get() != Some(id.id) {
+                    return EVENT_NOT_HANDLED;
+                }
+                let _ = listener.sender.send(id.id);
+                0
+            })
+            .unwrap_or(EVENT_NOT_HANDLED)
     }
 }
