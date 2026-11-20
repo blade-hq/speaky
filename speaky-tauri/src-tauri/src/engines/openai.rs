@@ -2,7 +2,28 @@ use super::{Engine, EngineError, EngineResult};
 use log::{debug, error};
 use once_cell::sync::Lazy;
 use reqwest::multipart;
+use serde::Deserialize;
 use tokio::runtime::Runtime;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JsonTranscript {
+    Text(String),
+    Object { text: String },
+}
+
+fn decode_transcript(body: &str, is_json: bool) -> EngineResult {
+    let text = if is_json {
+        match serde_json::from_str::<JsonTranscript>(body)
+            .map_err(|error| EngineError::InvalidResponse(error.to_string()))?
+        {
+            JsonTranscript::Text(text) | JsonTranscript::Object { text } => text,
+        }
+    } else {
+        body.to_owned()
+    };
+    Ok(text.trim().to_owned())
+}
 
 /// Recognition is called from a worker thread, so provide a runtime for the
 /// async HTTP implementation instead of assuming a Tokio context exists.
@@ -113,14 +134,37 @@ impl OpenAIEngine {
             });
         }
 
+        let is_json = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
         let text = response
             .text()
             .await
             .map_err(|e| EngineError::InvalidResponse(format!("Failed to read response: {}", e)))?;
 
-        let result = text.trim().to_string();
+        let result = decode_transcript(&text, is_json)?;
         debug!("Transcription complete: {} chars", result.len());
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_transcript;
+
+    #[test]
+    fn decodes_compatible_transcription_responses() {
+        assert_eq!(decode_transcript("  中文\n", false).unwrap(), "中文");
+        assert_eq!(decode_transcript(r#""中文""#, true).unwrap(), "中文");
+        assert_eq!(
+            decode_transcript(r#"{"text":"中文"}"#, true).unwrap(),
+            "中文"
+        );
+        assert_eq!(decode_transcript(r#""中文""#, false).unwrap(), r#""中文""#);
+        assert!(decode_transcript(r#"{"error":"invalid"}"#, true).is_err());
     }
 }
 
