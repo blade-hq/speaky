@@ -42,6 +42,8 @@ pub struct SettingsPage {
     picker: Option<Picker>,
     notice: Option<Result<String, String>>,
     checking: Option<ServiceCheck>,
+    pub(crate) polish_report: Option<Result<crate::polish_ui::BenchmarkResult, String>>,
+    pub(crate) polish_checking: bool,
 }
 
 enum Preference {
@@ -49,7 +51,10 @@ enum Preference {
     Device(Option<String>),
     Language(&'static str),
     #[cfg(target_os = "macos")]
-    Service(service_ui::ServiceInput),
+    Service(service_ui::ServiceInput, bool),
+    OrganizerEnabled(bool),
+    LearnPreferences(bool),
+    CustomPrompt(String),
 }
 
 pub fn selected_shortcut(config: &Config) -> hotkey::Shortcut {
@@ -65,6 +70,7 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
         Err(error) if error.kind() == ErrorKind::NotFound => Value::Null,
         Err(error) => return Err(error.to_string()),
     };
+    #[cfg(target_os = "macos")]
     let existing = if yaml.is_null() {
         Config::default()
     } else {
@@ -82,9 +88,23 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
         Preference::Language(language) => {
             yaml["core"]["asr"]["language"] = (*language).into();
         }
+        Preference::OrganizerEnabled(enabled) => yaml["llm"]["enabled"] = (*enabled).into(),
+        Preference::LearnPreferences(enabled) => {
+            yaml["llm"]["learn_preferences"] = (*enabled).into();
+        }
+        Preference::CustomPrompt(prompt) => {
+            yaml["llm"]["custom_prompt"] = prompt.trim().into();
+        }
         #[cfg(target_os = "macos")]
-        Preference::Service(input) => {
-            let old = existing.engine.openai;
+        Preference::Service(input, organizer) => {
+            let (old_url, old_key) = if *organizer {
+                (&existing.llm.openai.base_url, &existing.llm.openai.api_key)
+            } else {
+                (
+                    &existing.engine.openai.base_url,
+                    &existing.engine.openai.api_key,
+                )
+            };
             let url = service_url(&input.base_url)?;
             let model = input.model.trim();
             if model.is_empty() {
@@ -96,19 +116,25 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
                 .map(str::trim)
                 .filter(|key| !key.is_empty());
             if key.is_none()
-                && (old.api_key.trim().is_empty()
-                    || service_url(&old.base_url).map_or(true, |old| old.origin() != url.origin()))
+                && (old_key.trim().is_empty()
+                    || service_url(old_url).map_or(true, |old| old.origin() != url.origin()))
             {
                 return Err("请填写此服务的 API 密钥。无鉴权的内网服务可填 EMPTY。".into());
             }
+            let target = if *organizer {
+                yaml["llm"]["enabled"] = true.into();
+                &mut yaml["llm"]["openai"]
+            } else {
+                yaml["engine"]["current"] = "openai".into();
+                &mut yaml["engine"]["openai"]
+            };
             if let Some(key) = key {
                 reqwest::header::HeaderValue::from_str(key)
                     .map_err(|_| "API 密钥含不支持的字符。")?;
-                yaml["engine"]["openai"]["api_key"] = key.into();
+                target["api_key"] = key.into();
             }
-            yaml["engine"]["current"] = "openai".into();
-            yaml["engine"]["openai"]["base_url"] = url.as_str().trim_end_matches('/').into();
-            yaml["engine"]["openai"]["model"] = model.into();
+            target["base_url"] = url.as_str().trim_end_matches('/').into();
+            target["model"] = model.into();
         }
     }
 
@@ -146,8 +172,14 @@ impl Speaky {
 
     fn reload_settings(&mut self) {
         match Config::load() {
-            Ok(config) => self.settings.config = Some(config),
+            Ok(config) => {
+                self.organizer_enabled = config.llm.enabled;
+                self.organizer_learning = config.llm.learns_preferences();
+                self.settings.config = Some(config);
+            }
             Err(_) => {
+                self.organizer_enabled = false;
+                self.organizer_learning = false;
                 self.settings.config = None;
                 self.settings.notice =
                     Some(Err("无法读取配置，请检查 config.yaml 后重试。".into()));
@@ -180,6 +212,15 @@ impl Speaky {
         };
 
         if result.is_ok() {
+            let organizer_changed = match preference {
+                Preference::OrganizerEnabled(_) => true,
+                #[cfg(target_os = "macos")]
+                Preference::Service(_, organizer) => organizer,
+                _ => false,
+            };
+            if organizer_changed {
+                self.settings.polish_report = None;
+            }
             self.settings.picker = None;
             self.reload_settings();
         }
@@ -188,17 +229,63 @@ impl Speaky {
     }
 
     #[cfg(target_os = "macos")]
-    fn edit_recognition_service(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    fn edit_organizer_prompt(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let Some(config) = &self.settings.config else {
             return;
         };
-        let service = &config.engine.openai;
-        match service_ui::edit(window, &service.base_url, &service.model) {
+        let current = &config.llm.custom_prompt;
+        let initial = if current.trim().is_empty() {
+            crate::polish::Profile::Balanced.prompt()
+        } else {
+            current.clone()
+        };
+        let result = crate::terms_ui::edit_text(
+            window,
+            &initial,
+            "编辑整理提示词",
+            "自定义提示词用于之后的整理。留空并保存可恢复内置提示词。",
+        );
+        match result {
             Ok(receiver) => cx
                 .spawn(async move |entity, cx| {
                     let Ok(result) = receiver.await else { return };
                     let _ = entity.update(cx, |view, cx| match result {
-                        Ok(Some(input)) => view.apply_preference(Preference::Service(input), cx),
+                        Ok(Some(prompt)) => {
+                            view.apply_preference(Preference::CustomPrompt(prompt), cx)
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            view.settings.notice = Some(Err(error));
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach(),
+            Err(error) => {
+                self.settings.notice = Some(Err(error));
+                cx.notify();
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn edit_service(&mut self, window: &mut gpui::Window, organizer: bool, cx: &mut Context<Self>) {
+        let Some(config) = &self.settings.config else {
+            return;
+        };
+        let (base_url, model) = if organizer {
+            (&config.llm.openai.base_url, &config.llm.openai.model)
+        } else {
+            (&config.engine.openai.base_url, &config.engine.openai.model)
+        };
+        match service_ui::edit_model(window, base_url, model, organizer) {
+            Ok(receiver) => cx
+                .spawn(async move |entity, cx| {
+                    let Ok(result) = receiver.await else { return };
+                    let _ = entity.update(cx, |view, cx| match result {
+                        Ok(Some(input)) => {
+                            view.apply_preference(Preference::Service(input, organizer), cx)
+                        }
                         Ok(None) => {}
                         Err(error) => {
                             view.settings.notice = Some(Err(error));
@@ -393,9 +480,9 @@ impl Speaky {
                 .child(button("编辑", false).id("settings-edit-service").when(
                     !busy && self.settings.checking.is_none(),
                     |button| {
-                        button.on_click(cx.listener(|view, _, window, cx| {
-                            view.edit_recognition_service(window, cx)
-                        }))
+                        button.on_click(
+                            cx.listener(|view, _, window, cx| view.edit_service(window, false, cx)),
+                        )
                     },
                 ))
                 .when(configured, |actions| {
@@ -464,7 +551,200 @@ impl Speaky {
                 }),
             ],
         );
-        body.child(capture).child(recognition)
+        body.child(capture)
+            .child(recognition)
+            .child(self.organizer_section(config, busy, cx))
+    }
+
+    fn organizer_section(&self, config: &Config, busy: bool, cx: &mut Context<Self>) -> Div {
+        let llm = &config.llm;
+        let service = &llm.openai;
+        let checking = self.settings.polish_checking;
+        let custom = !llm.custom_prompt.trim().is_empty();
+        let preferences = llm
+            .learns_preferences()
+            .then(|| crate::polish_preferences::load(service));
+        let summary = if llm.enabled {
+            format!(
+                "{} · {}",
+                service.model,
+                service_url(&service.base_url)
+                    .map_or_else(|_| "地址无效".into(), |url| url.to_string())
+            )
+        } else {
+            "未启用".into()
+        };
+        let mut controls = div().flex().gap_1();
+        #[cfg(target_os = "macos")]
+        {
+            controls = controls.child(button("编辑模型", false).id("organizer-edit").when(
+                !busy && !checking,
+                |control| {
+                    control.on_click(
+                        cx.listener(|view, _, window, cx| view.edit_service(window, true, cx)),
+                    )
+                },
+            ));
+        }
+        if llm.enabled {
+            controls = controls
+                .child(
+                    button(
+                        if checking {
+                            "测试中…"
+                        } else {
+                            "运行固定基准"
+                        },
+                        false,
+                    )
+                    .id("organizer-benchmark")
+                    .when(!checking, |control| {
+                        control.on_click(cx.listener(|view, _, _, cx| view.benchmark(cx)))
+                    }),
+                )
+                .child(button("停用", false).id("organizer-disable").when(
+                    !busy && !checking,
+                    |control| {
+                        control.on_click(cx.listener(|view, _, _, cx| {
+                            view.apply_preference(Preference::OrganizerEnabled(false), cx)
+                        }))
+                    },
+                ));
+        } else if !service.api_key.trim().is_empty() {
+            controls = controls.child(button("启用", false).id("organizer-enable").when(
+                !busy && !checking,
+                |control| {
+                    control.on_click(cx.listener(|view, _, _, cx| {
+                        view.apply_preference(Preference::OrganizerEnabled(true), cx)
+                    }))
+                },
+            ));
+        }
+        section(
+            "语音整理",
+            [
+                setting_row("整理模型", Some(&summary), controls),
+                div().when(llm.enabled, |row| {
+                    let mut actions = div().flex().gap_1();
+                    #[cfg(target_os = "macos")]
+                    {
+                        actions = actions.child(
+                            button(
+                                if custom {
+                                    "编辑提示词"
+                                } else {
+                                    "添加提示词"
+                                },
+                                false,
+                            )
+                            .id("organizer-edit-prompt")
+                            .when(!busy, |control| {
+                                control.on_click(cx.listener(|view, _, window, cx| {
+                                    view.edit_organizer_prompt(window, cx)
+                                }))
+                            }),
+                        );
+                    }
+                    if custom && !busy {
+                        actions = actions.child(
+                            button("恢复内置", false)
+                                .id("organizer-reset-prompt")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.apply_preference(
+                                        Preference::CustomPrompt(String::new()),
+                                        cx,
+                                    )
+                                })),
+                        );
+                    }
+                    row.border_t_1()
+                        .border_color(rgb(BORDER))
+                        .child(setting_row(
+                            "整理提示词",
+                            Some(if custom { "自定义" } else { "内置" }),
+                            actions,
+                        ))
+                }),
+                div().when(llm.enabled, |row| {
+                    let learning = llm.learn_preferences;
+                    let summary = if custom && learning {
+                        "使用自定义提示词时暂停"
+                    } else if learning {
+                        "已开启"
+                    } else {
+                        "已跳过"
+                    };
+                    let action = div()
+                        .flex_none()
+                        .when(!busy && (!custom || learning), |action| {
+                            action.child(
+                                button(
+                                    if learning {
+                                        "跳过评分"
+                                    } else {
+                                        "开启评分"
+                                    },
+                                    false,
+                                )
+                                .id("organizer-toggle-learning")
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
+                                        view.apply_preference(
+                                            Preference::LearnPreferences(!learning),
+                                            cx,
+                                        )
+                                    },
+                                )),
+                            )
+                        });
+                    row.border_t_1()
+                        .border_color(rgb(BORDER))
+                        .child(setting_row("偏好评分", Some(summary), action))
+                }),
+                div().when_some(preferences, |content, preferences| {
+                    let mut action = div().flex_none();
+                    let summary = match preferences {
+                        Ok(preferences) => {
+                            let status = if preferences.settled() {
+                                let selected = preferences.selected();
+                                action = action.child(
+                                    button("复制提示词", false)
+                                        .id("organizer-copy-prompt")
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                selected.prompt(),
+                                            ));
+                                        })),
+                                );
+                                format!("已采用 {}", selected.label())
+                            } else {
+                                format!("下一次试用 {}", preferences.next_candidate().label())
+                            };
+                            let styles = crate::polish::Profile::ALL.map(|profile| {
+                                let (good, total) = preferences.progress(profile);
+                                format!("{} {good}/{total}", profile.label())
+                            });
+                            format!(
+                                "{status} · {}\n同一风格至少评 5 条，好评率达到 80% 后采用。",
+                                styles.join(" · ")
+                            )
+                        }
+                        Err(error) => error,
+                    };
+                    content
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .child(setting_row("个人偏好", Some(&summary), action))
+                }),
+                div().when(llm.enabled, |content| {
+                    content
+                        .px_3()
+                        .pb_1()
+                        .child(detail("点击整理时，仅将原转写文字发送到此模型。"))
+                }),
+                self.benchmark_result(),
+            ],
+        )
     }
 
     fn setting_picker(
@@ -508,7 +788,7 @@ pub fn listen_for_hotkey(mut presses: hotkey::HotkeyEvents, cx: &mut Context<Spe
     .detach();
 }
 
-fn detail(text: impl Into<SharedString>) -> Div {
+pub(crate) fn detail(text: impl Into<SharedString>) -> Div {
     div()
         .mt_0p5()
         .text_size(px(11.))
@@ -582,6 +862,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn organizer_scoring_is_optional_and_pauses_for_custom_prompts() {
+        let directory = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let path = directory.join("config.yaml");
+        save(&path, &Preference::OrganizerEnabled(true)).unwrap();
+        let load = || {
+            serde_yaml::from_str::<Config>(&fs::read_to_string(&path).unwrap())
+                .unwrap()
+                .llm
+        };
+        assert!(!load().learns_preferences());
+        assert!(load().custom_prompt.is_empty());
+        save(&path, &Preference::LearnPreferences(true)).unwrap();
+        assert!(load().learns_preferences());
+
+        for prompt in ["保留数字。\n按主题整理。", "保留英文，用短句。"] {
+            save(&path, &Preference::CustomPrompt(prompt.into())).unwrap();
+            let llm = load();
+            assert_eq!(llm.custom_prompt, prompt);
+            assert!(llm.learn_preferences);
+            assert!(!llm.learns_preferences());
+        }
+
+        save(&path, &Preference::CustomPrompt(" \n".into())).unwrap();
+        assert!(load().learns_preferences());
+        save(&path, &Preference::LearnPreferences(false)).unwrap();
+        assert!(!load().learns_preferences());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn updates_preferences_without_losing_existing_fields() {
         let directory = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         let path = directory.join("config.yaml");
@@ -620,11 +930,14 @@ mod tests {
         let directory = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         let path = directory.join("config.yaml");
         let service = |url: &str, key: Option<&str>| {
-            Preference::Service(ServiceInput {
-                base_url: url.into(),
-                model: "test-model".into(),
-                api_key: key.map(str::to_owned),
-            })
+            Preference::Service(
+                ServiceInput {
+                    base_url: url.into(),
+                    model: "test-model".into(),
+                    api_key: key.map(str::to_owned),
+                },
+                false,
+            )
         };
         save(
             &path,
@@ -640,6 +953,44 @@ mod tests {
         assert_eq!(config.engine.current, "openai");
         assert_eq!(config.engine.openai.base_url, "http://second.example/v1");
         assert_eq!(config.engine.openai.api_key, "EMPTY");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn organizer_configuration_is_independent_and_opt_in() {
+        let directory = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let path = directory.join("config.yaml");
+        assert!(!Config::default().llm.enabled);
+        let service = |base_url: &str, api_key: Option<&str>| service_ui::ServiceInput {
+            base_url: base_url.into(),
+            model: "test-model".into(),
+            api_key: api_key.map(str::to_owned),
+        };
+        save(
+            &path,
+            &Preference::Service(service("https://asr.example/v1", Some("asr-key")), false),
+        )
+        .unwrap();
+        assert!(save(
+            &path,
+            &Preference::Service(service("https://llm.example/v1", None), true),
+        )
+        .is_err());
+        save(
+            &path,
+            &Preference::Service(service("https://llm.example/v1", Some("llm-key")), true),
+        )
+        .unwrap();
+        let config: Config = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(config.llm.enabled);
+        assert_eq!(config.llm.openai.api_key, "llm-key");
+        assert_eq!(config.engine.openai.base_url, "https://asr.example/v1");
+        assert_eq!(config.engine.openai.api_key, "asr-key");
+        save(&path, &Preference::OrganizerEnabled(false)).unwrap();
+        let config: Config = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!config.llm.enabled);
+        assert_eq!(config.llm.openai.api_key, "llm-key");
         fs::remove_dir_all(directory).unwrap();
     }
 }

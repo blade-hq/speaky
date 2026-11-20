@@ -6,6 +6,10 @@ mod history;
 mod hotkey;
 mod icons;
 mod overlay;
+mod polish;
+mod polish_benchmark;
+mod polish_preferences;
+mod polish_ui;
 #[cfg(target_os = "macos")]
 mod service_ui;
 mod settings;
@@ -97,10 +101,14 @@ struct Speaky {
     playback: Option<Child>,
     invalid_terms: Option<String>,
     settings: settings::SettingsPage,
+    organizer_enabled: bool,
+    organizer_learning: bool,
+    organizer: polish_ui::Organizer,
 }
 
 impl Speaky {
     fn new(hotkey: Option<hotkey::GlobalHotkey>, hotkey_status: String) -> Self {
+        let organizer = config::Config::load().unwrap_or_default().llm;
         Self {
             recording: None,
             global_hotkey: hotkey,
@@ -121,6 +129,9 @@ impl Speaky {
             playback: None,
             invalid_terms: None,
             settings: settings::SettingsPage::default(),
+            organizer_enabled: organizer.enabled,
+            organizer_learning: organizer.learns_preferences(),
+            organizer: polish_ui::Organizer::default(),
         }
     }
 
@@ -742,6 +753,7 @@ impl Speaky {
                             let retry = entry.path.clone();
                             let resume = entry.path.clone();
                             let reveal = entry.path.clone();
+                            let organize = entry.path.clone();
                             let (label, text, pending_action) = match &entry.state {
                                 drafts::State::Draft => ("未转写", None, "转写"),
                                 drafts::State::Cancelled => ("转写已取消", None, "重试"),
@@ -770,7 +782,10 @@ impl Speaky {
                                         .min_w(px(0.))
                                         .pt(px(4.))
                                         .when(text.is_none(), |body| body.text_color(rgb(MUTED)))
-                                        .child(text.clone().unwrap_or_else(|| label.into())),
+                                        .child(text.clone().unwrap_or_else(|| label.into()))
+                                        .when_some(text.as_deref(), |body, source| {
+                                            body.child(self.organized_result(entry, source, cx))
+                                        }),
                                 )
                                 .child(
                                     history_actions()
@@ -847,6 +862,7 @@ impl Speaky {
                                                 ),
                                         )
                                         .when_some(text, |row, text| {
+                                            let original = text.clone();
                                             row.child(
                                                 icon_button(Icon::Copy, "复制文本").on_mouse_down(
                                                     MouseButton::Left,
@@ -856,6 +872,24 @@ impl Speaky {
                                                         );
                                                     }),
                                                 ),
+                                            )
+                                            .when(
+                                                self.organizer_enabled,
+                                                |row| {
+                                                    row.child(
+                                                        button("整理", false)
+                                                            .id(("organize-transcript", index))
+                                                            .on_click(cx.listener(
+                                                                move |view, _, _, cx| {
+                                                                    view.organize_transcript(
+                                                                        organize.clone(),
+                                                                        original.clone(),
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                                },
                                             )
                                         }),
                                 )
