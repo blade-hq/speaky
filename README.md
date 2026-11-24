@@ -14,6 +14,10 @@ cargo run --locked -p speaky-gpui
 
 Windows 构建后也可双击 `start-windows.cmd`。首次录音前，请在 Windows 的麦克风隐私设置中允许桌面应用访问麦克风。macOS 首次录音时会请求麦克风权限。
 
+## Windows 7 独立版
+
+在 Windows 7 SP1 x64 上，下载 `Speaky-Windows7-x64.zip`，解压后运行 `speaky-win7.exe`。独立版连接外部语音识别服务，支持全局快捷键和原生悬浮听写。参见 [Win7 部署说明](docs/Win7部署说明.md)。
+
 ## 使用
 
 - Windows 按 `Ctrl+Shift+空格`，macOS 按 `⌥⇧Space` 开始录音。再按一次停止并保存。录音进度和波形显示在悬浮窗中。

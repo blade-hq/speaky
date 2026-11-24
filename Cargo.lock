@@ -5378,6 +5378,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "speaky-win7"
+version = "0.1.0"
+dependencies = [
+ "embed-resource",
+ "speaky-core",
+ "windows 0.61.3",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

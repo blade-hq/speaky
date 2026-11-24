@@ -15,6 +15,16 @@ pub struct HotkeyEvents {
 }
 
 impl HotkeyEvents {
+    #[cfg(windows)]
+    pub fn try_recv(&mut self) -> bool {
+        while let Ok(id) = self.events.try_recv() {
+            if self.active_id.get() == Some(id) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn recv(&mut self) -> Option<()> {
         while let Some(id) = self.events.recv().await {
             if self.active_id.get() == Some(id) {

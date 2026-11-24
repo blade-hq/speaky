@@ -44,3 +44,20 @@ jobs:
           name: Speaky-Windows-x64
           path: Speaky-Windows-x64.zip
           if-no-files-found: error
+
+  win7:
+    name: Win7 (windows-2022)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Build and validate Windows 7 executable
+        shell: pwsh
+        run: ./scripts/build-win7.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Speaky-Windows7-x64
+          path: Speaky-Windows7-x64.zip
+          if-no-files-found: error

@@ -4,6 +4,7 @@ config.yaml
 /target/
 /Speaky-macOS.zip
 /Speaky-Windows-x64.zip
+/Speaky-Windows7-x64.zip
 
 # IDE
 .vscode/
