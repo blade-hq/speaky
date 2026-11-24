@@ -1,7 +1,5 @@
-#[cfg(test)]
 use super::shortcut::NUMPAD_NAMES;
 use super::shortcut::{Key, ALT, CTRL, NAMED, PLATFORM, SHIFT};
-use super::windows_capture::is_modifier;
 use super::{HotkeyEvents, Shortcut};
 use std::cell::{Cell, RefCell};
 use std::io;
@@ -19,7 +17,6 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VkKeyScanW, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_F1,
     VK_NUMPAD0,
 };
-#[cfg(test)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, MAPVK_VK_TO_CHAR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, MsgWaitForMultipleObjects, PeekMessageW, SetWindowsHookExW,
@@ -33,7 +30,6 @@ struct RegisteredKey {
     worker: Option<JoinHandle<()>>,
 }
 
-#[cfg(test)]
 pub(super) fn numpad_matches(offset: u8, event_key: &str) -> bool {
     // Match exactly the layout-specific character GPUI produces from wParam.
     // In particular, VK_DECIMAL may be reported as '.' or ','.
@@ -42,7 +38,6 @@ pub(super) fn numpad_matches(offset: u8, event_key: &str) -> bool {
     code != 0 && event_key.encode_utf16().eq([code as u16])
 }
 
-#[cfg(test)]
 fn find_pressed_numpad(event_key: &str, pressed: impl Fn(u16) -> bool) -> Option<u8> {
     if event_key.chars().count() != 1 {
         return None;
@@ -52,13 +47,27 @@ fn find_pressed_numpad(event_key: &str, pressed: impl Fn(u16) -> bool) -> Option
     })
 }
 
-#[cfg(test)]
 pub(super) fn pressed_numpad(event_key: &str) -> Option<u8> {
     // GetKeyState reflects the message currently being dispatched on the UI thread.
     find_pressed_numpad(event_key, |vk| unsafe { GetKeyState(i32::from(vk)) < 0 })
 }
 
-pub(super) fn is_keyboard_key(key: u8) -> bool {
+pub const WINDOWS_MODIFIERS: [(u8, u8); 8] = [
+    (0xa0, SHIFT),
+    (0xa1, SHIFT),
+    (0xa2, CTRL),
+    (0xa3, CTRL),
+    (0xa4, ALT),
+    (0xa5, ALT),
+    (0x5b, PLATFORM),
+    (0x5c, PLATFORM),
+];
+
+pub fn is_modifier(key: u8) -> bool {
+    WINDOWS_MODIFIERS.iter().any(|&(vk, _)| vk == key)
+}
+
+pub fn is_keyboard_key(key: u8) -> bool {
     (0x08..=0xfe).contains(&key) && !matches!(key, 0xe5 | 0xe7)
 }
 
@@ -108,7 +117,6 @@ pub(super) fn character_key(c: char) -> Result<(u8, u8), String> {
     Ok((key, modifiers))
 }
 
-#[cfg(test)]
 pub(super) fn normalize(mut shortcut: Shortcut) -> Result<Shortcut, String> {
     // GPUI folds Shift+1 into "!" on US keyboards, for example. Recover the
     // base key and required modifiers using the input thread's current layout.

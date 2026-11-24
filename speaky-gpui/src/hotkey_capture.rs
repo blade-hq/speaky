@@ -1,10 +1,6 @@
-use super::{
-    shortcut::{ALT, CTRL, PLATFORM, SHIFT},
-    windows::is_keyboard_key,
-    Shortcut,
-};
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use speaky_core::hotkey::{is_keyboard_key, is_modifier, Shortcut, WINDOWS_MODIFIERS};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -20,17 +16,6 @@ use windows::Win32::{
 
 const CAPTURE_ID: usize = 0x5350;
 
-const MODIFIERS: [(u8, u8); 8] = [
-    (0xa0, SHIFT),
-    (0xa1, SHIFT),
-    (0xa2, CTRL),
-    (0xa3, CTRL),
-    (0xa4, ALT),
-    (0xa5, ALT),
-    (0x5b, PLATFORM),
-    (0x5c, PLATFORM),
-];
-
 pub(crate) enum CaptureEvent {
     Preview(Option<Shortcut>),
     Chosen(Shortcut),
@@ -44,7 +29,7 @@ struct Keys {
 
 impl Keys {
     fn modifiers(&self) -> u8 {
-        MODIFIERS
+        WINDOWS_MODIFIERS
             .iter()
             .enumerate()
             .fold(0, |bits, (index, &(_, bit))| {
@@ -60,7 +45,7 @@ impl Keys {
         if repeated {
             return None;
         }
-        let modifier = MODIFIERS.iter().position(|&(vk, _)| vk == key);
+        let modifier = WINDOWS_MODIFIERS.iter().position(|&(vk, _)| vk == key);
         if let Some(index) = modifier {
             if down {
                 let alone = self.held == 0 && self.candidate.is_none();
@@ -92,10 +77,6 @@ impl Keys {
         self.candidate = Some((key, shortcut));
         Some(CaptureEvent::Preview(Some(shortcut)))
     }
-}
-
-pub(super) fn is_modifier(key: u8) -> bool {
-    MODIFIERS.iter().any(|&(vk, _)| vk == key)
 }
 
 struct Capture {

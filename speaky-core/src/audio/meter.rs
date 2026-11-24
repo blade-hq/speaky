@@ -8,6 +8,7 @@ const MAX_LAG: usize = ANALYSIS_RATE / 65;
 const WINDOW: usize = WINDOW_SAMPLES / DOWNSAMPLE;
 const COMPARISON_SAMPLES: usize = WINDOW - MAX_LAG - 1;
 
+#[derive(Clone, Copy)]
 pub struct VoiceActivity {
     pub level: f32,
     pub pitch_hz: Option<f32>,

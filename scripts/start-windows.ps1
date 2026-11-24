@@ -2,8 +2,8 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $exe = @(
     'speaky-gpui.exe'
-    'speaky-gpui/target/release/speaky-gpui.exe'
-    'speaky-gpui/target/debug/speaky-gpui.exe'
+    'target/release/speaky-gpui.exe'
+    'target/debug/speaky-gpui.exe'
 ) | ForEach-Object { Join-Path $root $_ } |
     Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
     Select-Object -First 1

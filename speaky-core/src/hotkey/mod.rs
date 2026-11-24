@@ -5,7 +5,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 mod mac_layout;
 mod shortcut;
 
-pub use shortcut::Shortcut;
+pub use shortcut::{Shortcut, ALT, CTRL, PLATFORM, SHIFT};
+#[cfg(windows)]
+pub use windows::{is_keyboard_key, is_modifier, WINDOWS_MODIFIERS};
 
 pub struct HotkeyEvents {
     events: UnboundedReceiver<u32>,
@@ -30,10 +32,6 @@ pub use macos::GlobalHotkey;
 mod windows;
 #[cfg(windows)]
 pub use windows::GlobalHotkey;
-#[cfg(windows)]
-mod windows_capture;
-#[cfg(windows)]
-pub(crate) use windows_capture::{CaptureEvent, WindowCapture};
 
 #[cfg(not(any(target_os = "macos", windows)))]
 pub struct GlobalHotkey;

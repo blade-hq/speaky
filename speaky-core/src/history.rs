@@ -12,7 +12,7 @@ use std::{
 const MAX_HISTORY_SIZE: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Target {
+pub enum Target {
     Draft(PathBuf),
     History(String),
 }
@@ -102,7 +102,7 @@ fn draft_result(entry: &drafts::Entry) -> Option<(Target, String)> {
     }
 }
 
-pub(super) fn standalone(archive: &[drafts::Entry]) -> Vec<(Target, String)> {
+pub fn standalone(archive: &[drafts::Entry]) -> Vec<(Target, String)> {
     ITEMS
         .lock()
         .iter()
@@ -111,7 +111,7 @@ pub(super) fn standalone(archive: &[drafts::Entry]) -> Vec<(Target, String)> {
         .collect()
 }
 
-pub(super) fn latest(archive: &[drafts::Entry]) -> Option<(Target, String)> {
+pub fn latest(archive: &[drafts::Entry]) -> Option<(Target, String)> {
     if !legacy_matches(&ITEMS.lock(), archive).is_empty() {
         let path = path();
         let migrate = || -> io::Result<()> {
@@ -211,7 +211,7 @@ fn latest_from(items: &[HistoryItem], archive: &[drafts::Entry]) -> Option<(Targ
         .or_else(|| Some((Target::History(item.id.clone()), item.text.clone())))
 }
 
-pub(super) fn record(draft: &Path, text: &str, engine: &str) -> io::Result<()> {
+pub fn record(draft: &Path, text: &str, engine: &str) -> io::Result<()> {
     let path = path();
     record_in(&path, &ITEMS, draft, text, engine)
 }
@@ -259,7 +259,7 @@ fn record_in(
     Ok(())
 }
 
-pub(super) fn edit(target: &Target, expected: &str, edited: &str) -> io::Result<()> {
+pub fn edit(target: &Target, expected: &str, edited: &str) -> io::Result<()> {
     let path = path();
     edit_in(&path, &ITEMS, target, expected, edited)
 }

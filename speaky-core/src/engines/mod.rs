@@ -3,10 +3,12 @@ mod openai;
 mod remote;
 mod volcengine;
 
-pub(crate) use detect::{check_service, detect_service};
+pub use detect::{check_service, detect_service};
 pub use openai::OpenAIEngine;
+#[cfg(feature = "local-packs")]
 pub(crate) use openai::RUNTIME;
-pub(crate) use remote::{Protocol, RemoteEngine};
+pub use remote::Protocol;
+use remote::RemoteEngine;
 pub use volcengine::VolcBigModelEngine;
 
 use crate::config::Config;
@@ -145,7 +147,7 @@ pub trait Engine: Send + Sync {
     }
 }
 
-pub(crate) fn uses_local_asr(config: &Config) -> bool {
+pub fn uses_local_asr(config: &Config) -> bool {
     config.engine.current == "local"
 }
 
@@ -154,7 +156,10 @@ pub fn recognition_engine(config: &Config) -> Result<Box<dyn Engine + Send + Syn
         return Ok(Box::new(configured_remote(config)?));
     }
     if uses_local_asr(config) {
+        #[cfg(feature = "local-packs")]
         return Ok(Box::new(crate::model_packs::ready_engine(config)?));
+        #[cfg(not(feature = "local-packs"))]
+        return Err("当前版本仅支持连接外部语音识别服务，请在设置中配置识别服务地址。".into());
     }
     create_engine(config).ok_or_else(|| "请先配置语音识别服务。".to_owned())
 }
@@ -226,4 +231,15 @@ pub fn create_engine(config: &Config) -> Option<Box<dyn Engine + Send + Sync>> {
             None
         }
     }
+}
+
+#[cfg(all(test, not(feature = "local-packs")))]
+#[test]
+fn local_config_explains_that_an_external_recognizer_is_required() {
+    let mut config = Config::default();
+    config.engine.current = "local".into();
+    assert_eq!(
+        recognition_engine(&config).err().as_deref(),
+        Some("当前版本仅支持连接外部语音识别服务，请在设置中配置识别服务地址。")
+    );
 }

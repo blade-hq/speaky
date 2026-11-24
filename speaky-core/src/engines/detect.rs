@@ -4,7 +4,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-const SAMPLE: &[u8] = include_bytes!("../../assets/settings-sample.wav");
+use crate::session::SAMPLE_AUDIO as SAMPLE;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn candidates(address: &str) -> Result<Vec<(Protocol, Url)>, String> {
@@ -111,7 +111,7 @@ fn single_model(endpoint: &Url, api_key: &str, remaining: Duration) -> Result<St
     })
 }
 
-pub(crate) fn detect_service(
+pub fn detect_service(
     address: &str,
     model: &str,
     api_key: &str,
@@ -157,7 +157,7 @@ pub(crate) fn detect_service(
     Err(format!("服务未通过试转写。{}", failures.join("；")))
 }
 
-pub(crate) fn check_service(service: &RemoteService) -> Result<String, String> {
+pub fn check_service(service: &RemoteService) -> Result<String, String> {
     test_sample(service, CHECK_TIMEOUT)
 }
 

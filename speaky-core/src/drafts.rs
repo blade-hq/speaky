@@ -24,6 +24,16 @@ pub struct Organized {
     pub profile: Option<crate::polish::Profile>,
 }
 
+impl Organized {
+    pub fn model_settings(&self) -> crate::config::LlmOpenAIConfig {
+        crate::config::LlmOpenAIConfig {
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            api_key: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum State {
@@ -47,7 +57,7 @@ struct Transcript {
     recognizer: Option<String>,
 }
 
-pub(super) fn directory() -> PathBuf {
+pub fn directory() -> PathBuf {
     crate::config::Config::config_dir().join("drafts")
 }
 
@@ -82,7 +92,7 @@ fn save_transcript(path: &Path, transcript: &Transcript) -> io::Result<()> {
     write_atomically(&path.with_extension("json"), &bytes)
 }
 
-pub(super) fn record(
+pub fn record(
     path: &Path,
     text: &str,
     when: SystemTime,
@@ -106,7 +116,7 @@ pub(super) fn record(
     save_transcript(path, &transcript)
 }
 
-pub(super) fn edit(path: &Path, expected: &str, edited: &str) -> io::Result<()> {
+pub fn edit(path: &Path, expected: &str, edited: &str) -> io::Result<()> {
     let mut transcript = read_transcript(path)?;
     if !matches!(&transcript.state, State::Transcribed { text } if text == expected) {
         return Err(io::Error::other("转写内容已变化，请重新打开后修改。"));
@@ -125,7 +135,7 @@ pub fn save_organized(path: &Path, result: &Organized) -> io::Result<()> {
     write_atomically(&path.with_extension("polish.json"), &metadata)
 }
 
-pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent directory"))?;

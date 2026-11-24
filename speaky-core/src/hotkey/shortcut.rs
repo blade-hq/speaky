@@ -1,6 +1,3 @@
-#[cfg(any(not(windows), test))]
-use gpui::Keystroke;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Key {
     Character(char),
@@ -91,10 +88,10 @@ impl Key {
     }
 }
 
-pub(super) const CTRL: u8 = 1;
-pub(super) const ALT: u8 = 2;
-pub(super) const SHIFT: u8 = 4;
-pub(super) const PLATFORM: u8 = 8;
+pub const CTRL: u8 = 1;
+pub const ALT: u8 = 2;
+pub const SHIFT: u8 = 4;
+pub const PLATFORM: u8 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shortcut {
@@ -127,11 +124,10 @@ impl Shortcut {
         modifiers: CTRL | SHIFT,
     };
 
-    #[cfg(any(not(windows), test))]
-    pub fn from_keystroke(stroke: &Keystroke) -> Result<Self, String> {
-        let shortcut = Self::from_event(stroke)?;
+    pub fn from_key(key: &str, modifiers: u8) -> Result<Self, String> {
+        let shortcut = Self::from_event(key, modifiers)?;
         #[cfg(windows)]
-        if let Some(numpad) = super::windows::pressed_numpad(&stroke.key) {
+        if let Some(numpad) = super::windows::pressed_numpad(key) {
             return Ok(Self {
                 key: Key::Numpad(numpad),
                 ..shortcut
@@ -140,22 +136,12 @@ impl Shortcut {
         shortcut.normalized()
     }
 
-    #[cfg(any(not(windows), test))]
-    fn from_event(stroke: &Keystroke) -> Result<Self, String> {
-        let key = Key::parse(&stroke.key)
-            .ok_or_else(|| "请选择字母、数字、符号、功能键或导航键。".to_owned())?;
-        let mods = stroke.modifiers;
-        if mods.function {
-            return Err("系统无法将 Fn 作为全局快捷键的修饰键。".into());
-        }
-        let modifiers = CTRL * mods.control as u8
-            | ALT * mods.alt as u8
-            | SHIFT * mods.shift as u8
-            | PLATFORM * mods.platform as u8;
+    fn from_event(key: &str, modifiers: u8) -> Result<Self, String> {
+        let key =
+            Key::parse(key).ok_or_else(|| "请选择字母、数字、符号、功能键或导航键。".to_owned())?;
         Ok(Self { key, modifiers })
     }
 
-    #[cfg(any(not(windows), test))]
     fn normalized(self) -> Result<Self, String> {
         #[cfg(windows)]
         return super::windows::normalize(self);
@@ -172,15 +158,14 @@ impl Shortcut {
         Ok(self)
     }
 
-    #[cfg(not(windows))]
-    pub fn matches_release(self, stroke: &Keystroke) -> bool {
-        Self::from_event(stroke)
+    pub fn matches_release(self, key: &str, modifiers: u8) -> bool {
+        Self::from_event(key, modifiers)
             .and_then(Self::normalized)
             .is_ok_and(|released| self.key == released.key)
     }
 
     #[cfg(windows)]
-    pub(super) fn from_windows(code: u8, modifiers: u8) -> Self {
+    pub fn from_windows(code: u8, modifiers: u8) -> Self {
         let character = (code as char).to_ascii_lowercase();
         let key = match code {
             0x30..=0x39 | 0x41..=0x5a
@@ -259,13 +244,13 @@ mod tests {
 
     #[test]
     fn captures_and_round_trips_single_keys_and_chords() {
-        for (stroke, label) in [
-            ("f8", "F8"),
-            ("k", "K"),
-            ("ctrl-shift-j", "Ctrl+Shift+J"),
-            ("ctrl-pageup", "Ctrl+Page Up"),
+        for (key, modifiers, label) in [
+            ("f8", 0, "F8"),
+            ("k", 0, "K"),
+            ("j", CTRL | SHIFT, "Ctrl+Shift+J"),
+            ("pageup", CTRL, "Ctrl+Page Up"),
         ] {
-            let shortcut = Shortcut::from_keystroke(&Keystroke::parse(stroke).unwrap()).unwrap();
+            let shortcut = Shortcut::from_key(key, modifiers).unwrap();
             assert_eq!(shortcut.label(), label);
             assert_eq!(Shortcut::from_id(&shortcut.id()), Some(shortcut));
         }

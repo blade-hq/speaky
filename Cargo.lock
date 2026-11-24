@@ -5330,23 +5330,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "speaky-gpui"
+name = "speaky-core"
 version = "0.1.0"
 dependencies = [
- "block",
  "byteorder",
  "cpal",
  "dirs 5.0.1",
- "embed-resource",
- "embed_plist",
  "flate2",
  "futures-util",
- "gpui",
  "log",
- "objc",
  "once_cell",
  "parking_lot",
- "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",
@@ -5355,6 +5349,29 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "unicode-segmentation",
+ "uuid",
+ "windows 0.61.3",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "speaky-gpui"
+version = "0.1.0"
+dependencies = [
+ "block",
+ "embed-resource",
+ "embed_plist",
+ "gpui",
+ "log",
+ "objc",
+ "once_cell",
+ "raw-window-handle",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "speaky-core",
+ "tokio",
  "uuid",
  "windows 0.61.3",
  "windows-sys 0.61.2",

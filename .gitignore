@@ -1,6 +1,7 @@
 config.yaml
 /packs/
 /speaky-gpui/target/
+/target/
 /Speaky-macOS.zip
 /Speaky-Windows-x64.zip
 

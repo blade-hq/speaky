@@ -328,14 +328,20 @@ impl AutomationEditor {
     fn capture(focus: Focus) -> Result<Self, String> {
         focus.require_current()?;
         unsafe {
-            let client: IUIAutomation = readable(CoCreateInstance(
-                &CUIAutomation8,
-                None,
-                CLSCTX_INPROC_SERVER,
-            ))?;
-            let options: IUIAutomation2 = readable(client.cast())?;
-            readable(options.SetConnectionTimeout(500))?;
-            readable(options.SetTransactionTimeout(500))?;
+            let client: IUIAutomation =
+                match CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) {
+                    Ok(client) => {
+                        let client: IUIAutomation = client;
+                        if let Ok(options) = client.cast::<IUIAutomation2>() {
+                            let _ = options.SetConnectionTimeout(500);
+                            let _ = options.SetTransactionTimeout(500);
+                        }
+                        client
+                    }
+                    Err(_) => {
+                        readable(CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER))?
+                    }
+                };
             let field = readable(client.GetFocusedElement())?;
             let editor = Self { client, field };
             editor
@@ -625,10 +631,8 @@ fn unicode_packets(text: &str) -> Result<Vec<INPUT>, String> {
     Ok(events)
 }
 
-#[path = "dictation_target/live.rs"]
 mod live;
 
-#[path = "dictation_target/clipboard.rs"]
 mod clipboard;
 
 #[cfg(test)]

@@ -12,34 +12,23 @@ use gpui::{KeyUpEvent, KeystrokeEvent};
 use serde_yaml::Value;
 use std::{fs, io::ErrorKind, path::Path};
 
-const LANGUAGES: [(&str, &str); 6] = [
-    ("auto", "自动检测"),
-    ("zh", "中文（普通话）"),
-    ("yue", "粤语"),
-    ("en", "英语"),
-    ("ja", "日语"),
-    ("ko", "韩语"),
-];
+use speaky_core::session::{sample_comparison, LANGUAGES, SAMPLE_AUDIO, SAMPLE_REFERENCE};
 
-const SAMPLE_REFERENCE: &str = "你好，语音识别测试。";
-
-fn sample_comparison(text: &str) -> &'static str {
-    let recognized = text
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .map(|c| match c {
-            '語' => '语',
-            '識' => '识',
-            '別' => '别',
-            '測' => '测',
-            '試' => '试',
-            other => other,
-        });
-    if recognized.eq(SAMPLE_REFERENCE.chars().filter(|c| c.is_alphanumeric())) {
-        "样本与参考一致"
-    } else {
-        "样本与参考有差异"
+#[cfg(any(not(windows), test))]
+fn shortcut_modifiers(stroke: &gpui::Keystroke) -> Result<u8, String> {
+    let mods = stroke.modifiers;
+    if mods.function {
+        return Err("系统无法将 Fn 作为全局快捷键的修饰键。".into());
     }
+    Ok(hotkey::CTRL * u8::from(mods.control)
+        | hotkey::ALT * u8::from(mods.alt)
+        | hotkey::SHIFT * u8::from(mods.shift)
+        | hotkey::PLATFORM * u8::from(mods.platform))
+}
+
+#[cfg(any(not(windows), test))]
+fn shortcut_from_keystroke(stroke: &gpui::Keystroke) -> Result<hotkey::Shortcut, String> {
+    hotkey::Shortcut::from_key(&stroke.key, shortcut_modifiers(stroke)?)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,7 +43,7 @@ struct ShortcutCapture {
     #[cfg(not(windows))]
     _keydown: Subscription,
     #[cfg(windows)]
-    _native: hotkey::WindowCapture,
+    _native: crate::hotkey_capture::WindowCapture,
     #[cfg(windows)]
     session: uuid::Uuid,
     previous: hotkey::Shortcut,
@@ -339,7 +328,7 @@ impl Speaky {
             return;
         };
         #[cfg(windows)]
-        let (native, mut events) = match hotkey::WindowCapture::start(window) {
+        let (native, mut events) = match crate::hotkey_capture::WindowCapture::start(window) {
             Ok(capture) => capture,
             Err(error) => {
                 self.settings.notice = Some(Err(error));
@@ -395,12 +384,12 @@ impl Speaky {
                         return false;
                     };
                     match event {
-                        hotkey::CaptureEvent::Preview(candidate) => {
+                        crate::hotkey_capture::CaptureEvent::Preview(candidate) => {
                             capture.candidate = candidate;
                             cx.notify();
                             true
                         }
-                        hotkey::CaptureEvent::Chosen(shortcut) => {
+                        crate::hotkey_capture::CaptureEvent::Chosen(shortcut) => {
                             view.apply_preference(Preference::Shortcut(shortcut), cx);
                             false
                         }
@@ -448,7 +437,7 @@ impl Speaky {
         if capture.candidate.is_some() {
             return;
         }
-        match hotkey::Shortcut::from_keystroke(&event.keystroke) {
+        match shortcut_from_keystroke(&event.keystroke) {
             Ok(shortcut) => {
                 capture.candidate = Some(shortcut);
                 self.settings.notice = None;
@@ -479,7 +468,9 @@ impl Speaky {
             }
             return;
         };
-        if !shortcut.matches_release(&event.keystroke) {
+        if !shortcut_modifiers(&event.keystroke)
+            .is_ok_and(|mods| shortcut.matches_release(&event.keystroke.key, mods))
+        {
             return;
         }
         self.apply_preference(Preference::Shortcut(shortcut), cx);
@@ -779,7 +770,7 @@ impl Speaky {
             } else {
                 let engine = crate::engines::recognition_engine(&config)?;
                 let text = engine
-                    .transcribe(include_bytes!("../assets/settings-sample.wav"), "zh")
+                    .transcribe(SAMPLE_AUDIO, "zh")
                     .map_err(|error| error.to_string())?;
                 (engine.name().to_string(), text)
             };
@@ -1617,8 +1608,7 @@ mod tests {
         );
         assert_eq!(updated["engine"], before["engine"]);
         assert_eq!(updated["extension"], before["extension"]);
-        let custom =
-            hotkey::Shortcut::from_keystroke(&gpui::Keystroke::parse("f8").unwrap()).unwrap();
+        let custom = shortcut_from_keystroke(&gpui::Keystroke::parse("f8").unwrap()).unwrap();
         save(&path, &Preference::Shortcut(custom)).unwrap();
         let reloaded: Config = serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(selected_shortcut(&reloaded), custom);

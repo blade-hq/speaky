@@ -273,7 +273,7 @@ impl Default for OpenAIConfig {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RemoteService {
+pub struct RemoteService {
     pub address: String,
     pub endpoint: String,
     pub protocol: crate::engines::Protocol,
@@ -307,7 +307,7 @@ pub struct EngineConfig {
     #[serde(default)]
     pub openai: OpenAIConfig,
     #[serde(default, skip_serializing_if = "RemoteService::is_empty")]
-    pub(crate) remote: RemoteService,
+    pub remote: RemoteService,
     /// Last selected on-device recognizer, kept separately from external services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_pack: Option<String>,

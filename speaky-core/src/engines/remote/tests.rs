@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::{
     Message,
 };
 
-const SAMPLE: &[u8] = include_bytes!("../../../assets/settings-sample.wav");
+use crate::session::SAMPLE_AUDIO as SAMPLE;
 
 fn http_fixture(
     status: u16,

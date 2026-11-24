@@ -9,7 +9,7 @@ Windows 发布包解压后运行 `start-windows.cmd`。macOS 发布包解压后�
 先安装 Rust stable。macOS 需要 Command Line Tools。Windows 推荐使用 MSVC 工具链，并在 Visual Studio Build Tools 中勾选「使用 C++ 的桌面开发」和 Windows SDK。在仓库根目录运行下面的命令。
 
 ```sh
-cargo run --locked --manifest-path speaky-gpui/Cargo.toml
+cargo run --locked -p speaky-gpui
 ```
 
 Windows 构建后也可双击 `start-windows.cmd`。首次录音前，请在 Windows 的麦克风隐私设置中允许桌面应用访问麦克风。macOS 首次录音时会请求麦克风权限。
@@ -30,8 +30,8 @@ Windows 构建后也可双击 `start-windows.cmd`。首次录音前，请在 Win
 ## 开发验证
 
 ```sh
-cargo test --locked --manifest-path speaky-gpui/Cargo.toml
-cargo build --locked --manifest-path speaky-gpui/Cargo.toml
+cargo test --workspace --locked
+cargo build --locked -p speaky-gpui
 ```
 
-GPUI 界面、录音、历史和识别引擎都位于 `speaky-gpui/src/`。
+GPUI 界面位于 `speaky-gpui/src/`，录音、历史和识别引擎位于 `speaky-core/src/`。

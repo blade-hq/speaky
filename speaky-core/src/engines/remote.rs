@@ -11,7 +11,7 @@ use std::time::Duration;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Protocol {
+pub enum Protocol {
     #[default]
     #[serde(rename = "openai")]
     OpenAI,
@@ -21,7 +21,7 @@ pub(crate) enum Protocol {
 }
 
 impl Protocol {
-    pub(crate) fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::OpenAI => "OpenAI 兼容转写",
             Self::WhisperCpp => "whisper.cpp 原生 HTTP",

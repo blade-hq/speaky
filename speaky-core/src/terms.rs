@@ -64,7 +64,7 @@ fn manual_has(rules: &[Rule<'_>], term: &str) -> bool {
         .any(|rule| rule.preferred.eq_ignore_ascii_case(term))
 }
 
-pub(crate) fn learned() -> io::Result<Vec<String>> {
+pub fn learned() -> io::Result<Vec<String>> {
     let mut words = read_learned(&learned_path())?;
     let source = load()?;
     let manual = parse(&source)?;
@@ -72,7 +72,7 @@ pub(crate) fn learned() -> io::Result<Vec<String>> {
     Ok(words)
 }
 
-pub(crate) fn learn_edits_with_selection(
+pub fn learn_edits_with_selection(
     original: &str,
     edited: &str,
     selection: Option<Range<usize>>,
@@ -103,7 +103,7 @@ fn remember(path: &Path, manual: &[Rule<'_>], changes: Vec<String>) -> io::Resul
     Ok(added)
 }
 
-pub(crate) fn forget_learned(term: &str) -> io::Result<()> {
+pub fn forget_learned(term: &str) -> io::Result<()> {
     let _lock = lock_dictionary(&Config::config_dir())?;
     let path = learned_path();
     let mut words = read_learned(&path)?;

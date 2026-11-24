@@ -46,7 +46,7 @@ fn default_api_base_path() -> String {
 }
 
 #[derive(Clone)]
-pub(super) struct Pack {
+pub struct Pack {
     pub id: String,
     pub label: String,
     directory: PathBuf,
@@ -144,7 +144,7 @@ fn directories() -> Vec<PathBuf> {
     directories
 }
 
-pub(super) fn prepare_directory() -> Result<PathBuf, String> {
+pub fn prepare_directory() -> Result<PathBuf, String> {
     let mut last_error = None;
     for path in directories() {
         match fs::create_dir_all(&path) {
@@ -155,7 +155,7 @@ pub(super) fn prepare_directory() -> Result<PathBuf, String> {
     Err(last_error.map_or_else(|| "找不到模型包目录。".into(), |error| error.to_string()))
 }
 
-pub(super) fn list() -> Result<Vec<Pack>, String> {
+pub fn list() -> Result<Vec<Pack>, String> {
     let mut packs: Vec<Pack> = Vec::new();
     let mut error = None;
     for directory in directories() {
@@ -196,14 +196,14 @@ pub(super) fn list() -> Result<Vec<Pack>, String> {
     Ok(packs)
 }
 
-pub(super) fn selected_id(config: &Config) -> Option<&str> {
+pub fn selected_id(config: &Config) -> Option<&str> {
     crate::engines::uses_local_asr(config)
         .then_some(config.engine.local_pack.as_deref())
         .flatten()
         .filter(|id| !id.trim().is_empty())
 }
 
-pub(super) fn selected_label(config: &Config) -> String {
+pub fn selected_label(config: &Config) -> String {
     match config.engine.current.as_str() {
         "local" => selected_id(config).map_or_else(
             || "请选择本地模型包".into(),
@@ -221,11 +221,11 @@ pub(super) fn selected_label(config: &Config) -> String {
     }
 }
 
-pub(super) fn activate(pack: &Pack) -> Result<OpenAIEngine, String> {
+pub fn activate(pack: &Pack) -> Result<OpenAIEngine, String> {
     MANAGER.lock().activate(pack, &QUITTING)
 }
 
-pub(super) fn ready_engine(config: &Config) -> Result<OpenAIEngine, String> {
+pub fn ready_engine(config: &Config) -> Result<OpenAIEngine, String> {
     let id = selected_id(config).ok_or("请先选择本地模型包。")?;
     let mut manager = MANAGER.lock();
     if let Some(engine) = manager.running_engine(id)? {
@@ -238,11 +238,11 @@ pub(super) fn ready_engine(config: &Config) -> Result<OpenAIEngine, String> {
     manager.activate(&pack, &QUITTING)
 }
 
-pub(super) fn release() -> Result<(), String> {
+pub fn release() -> Result<(), String> {
     MANAGER.lock().release()
 }
 
-pub(super) fn shutdown() -> Result<(), String> {
+pub fn shutdown() -> Result<(), String> {
     QUITTING.store(true, Ordering::Relaxed);
     release()
 }

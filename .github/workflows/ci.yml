@@ -20,15 +20,13 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
-    defaults:
-      run:
-        working-directory: speaky-gpui
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked
+      - run: cargo test --workspace --locked
+      - run: cargo test -p speaky-core --no-default-features --locked
       - if: runner.os == 'macOS'
-        run: cargo build --locked
+        run: cargo build -p speaky-gpui --locked
       - if: runner.os == 'Windows'
         name: Build portable Windows client
         shell: pwsh
@@ -37,9 +35,9 @@ jobs:
               Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
           if (!$fxc) { throw 'Windows SDK fxc.exe is required for the release build.' }
           $env:GPUI_FXC_PATH = $fxc.FullName
-          cargo build --release --locked
+          cargo build -p speaky-gpui --release --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ../scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output ../Speaky-Windows-x64.zip
+          ./scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
