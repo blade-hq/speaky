@@ -1,8 +1,13 @@
+mod detect;
 mod openai;
+mod remote;
 mod volcengine;
 
+pub(crate) use detect::{check_service, detect_service};
 pub use openai::OpenAIEngine;
-pub use volcengine::{VolcBigModelEngine, VolcRealtimeSession};
+pub(crate) use openai::RUNTIME;
+pub(crate) use remote::{Protocol, RemoteEngine};
+pub use volcengine::VolcBigModelEngine;
 
 use crate::config::Config;
 use log::{info, warn};
@@ -15,6 +20,12 @@ pub type PartialResultCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Result type for engine operations
 pub type EngineResult = Result<String, EngineError>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptionPass {
+    Preview,
+    Final,
+}
 
 /// Errors that can occur during engine operations
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +64,17 @@ impl std::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+fn http_status_error(status: u16) -> EngineError {
+    let detail = match status {
+        401 | 403 => "请检查 API 密钥和访问权限。",
+        404 => "请检查转写路径和模型 ID。",
+        400 | 422 => "请检查模型 ID 和音频格式。",
+        429 => return EngineError::RateLimited("HTTP 429，服务请求过多或额度不足。".into()),
+        _ => "请检查服务状态。",
+    };
+    EngineError::NetworkError(format!("HTTP {status}，{detail}"))
+}
+
 /// Trait for ASR (Automatic Speech Recognition) engines
 ///
 /// Implement this trait to add support for different speech recognition
@@ -86,6 +108,7 @@ pub trait Engine: Send + Sync {
         audio_data: &[u8],
         language: &str,
         _vocabulary: &[&str],
+        _pass: TranscriptionPass,
     ) -> EngineResult {
         self.transcribe(audio_data, language)
     }
@@ -120,6 +143,30 @@ pub trait Engine: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+}
+
+pub(crate) fn uses_local_asr(config: &Config) -> bool {
+    config.engine.current == "local"
+}
+
+pub fn recognition_engine(config: &Config) -> Result<Box<dyn Engine + Send + Sync>, String> {
+    if config.engine.current == "remote" {
+        return Ok(Box::new(configured_remote(config)?));
+    }
+    if uses_local_asr(config) {
+        return Ok(Box::new(crate::model_packs::ready_engine(config)?));
+    }
+    create_engine(config).ok_or_else(|| "请先配置语音识别服务。".to_owned())
+}
+
+fn configured_remote(config: &Config) -> Result<RemoteEngine, String> {
+    let service = &config.engine.remote;
+    RemoteEngine::new(
+        service.protocol,
+        &service.endpoint,
+        &service.model,
+        &service.api_key,
+    )
 }
 
 /// Create an engine based on configuration
@@ -159,12 +206,7 @@ pub fn create_engine(config: &Config) -> Option<Box<dyn Engine + Send + Sync>> {
             }
         }
         "openai" => {
-            let engine = OpenAIEngine::new(
-                &config.engine.openai.api_key,
-                &config.engine.openai.model,
-                &config.engine.openai.base_url,
-            )
-            .with_vocabulary_prompt(config.engine.openai.use_vocabulary_prompt);
+            let engine = OpenAIEngine::from_service(&config.engine.openai);
             if engine.is_available() {
                 info!(
                     "Using OpenAI engine (model: {})",

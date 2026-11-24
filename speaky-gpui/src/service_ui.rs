@@ -9,6 +9,38 @@ type EditResult = tokio::sync::oneshot::Receiver<Result<Option<ServiceInput>, St
 #[cfg(target_os = "macos")]
 pub use macos::edit_model;
 
+#[cfg(windows)]
+pub fn edit_model(
+    window: &mut gpui::Window,
+    base_url: &str,
+    model: &str,
+    organizer: bool,
+) -> Result<EditResult, String> {
+    let (title, help) = if organizer {
+        (
+            "编辑整理模型",
+            "密钥留空可保留同一服务已有的密钥。本地无鉴权服务可填 EMPTY。",
+        )
+    } else {
+        (
+            "连接识别服务",
+            "填写已运行的服务地址。OpenAI 兼容服务可填写模型 ID。\n保存时会用内置样本检测接口和转写。同一服务可留空沿用原密钥。",
+        )
+    };
+    crate::windows_dialog::edit(
+        window,
+        101,
+        title,
+        help,
+        [base_url.to_owned(), model.to_owned(), String::new()],
+        |[base_url, model, key]| ServiceInput {
+            base_url,
+            model,
+            api_key: (!key.trim().is_empty()).then_some(key),
+        },
+    )
+}
+
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
 mod macos {
@@ -56,7 +88,11 @@ mod macos {
             let base_field = add_field(
                 *form,
                 126.,
-                "服务地址（Base URL）",
+                if organizer {
+                    "服务地址（Base URL）"
+                } else {
+                    "服务地址（HTTP 或 WebSocket）"
+                },
                 base_url,
                 "https://api.example.com/v1",
                 false,
@@ -64,7 +100,7 @@ mod macos {
             let example = if organizer {
                 "gpt-4o-mini"
             } else {
-                "sensevoice-small"
+                "OpenAI 兼容服务可填模型 ID"
             };
             let model_field = add_field(*form, 70., "模型 ID", model, example, false);
             let key_field = add_field(
@@ -78,12 +114,14 @@ mod macos {
             let title = if organizer {
                 "编辑整理模型"
             } else {
-                "编辑识别服务"
+                "自动检测识别服务"
             };
             let _: () = msg_send![*alert, setMessageText: ns_string(title)];
-            let help = ns_string(
-                "填写 OpenAI 兼容服务的基础地址和模型 ID。\n同一服务器可留空沿用原密钥。更换服务器请填入该服务器的密钥，无鉴权服务可填 EMPTY。",
-            );
+            let help = ns_string(if organizer {
+                "填写 OpenAI 兼容服务的基础地址和模型 ID。\n同一服务器可留空沿用原密钥。更换服务器请填入该服务器的密钥，无鉴权服务可填 EMPTY。"
+            } else {
+                "保存时自动识别接入方式并转写内置样本。同一服务可留空沿用原密钥。"
+            });
             let _: () = msg_send![*alert, setInformativeText: help];
             let _: () = msg_send![*alert, setAccessoryView: *form];
             let save: *mut Object = msg_send![*alert, addButtonWithTitle: ns_string("保存")];

@@ -1,5 +1,8 @@
-/speaky-gpui/target/
 config.yaml
+/packs/
+/speaky-gpui/target/
+/Speaky-macOS.zip
+/Speaky-Windows-x64.zip
 
 # IDE
 .vscode/

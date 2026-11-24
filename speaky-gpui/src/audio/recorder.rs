@@ -1,3 +1,4 @@
+use super::meter::{self, VoiceActivity, WINDOW_SAMPLES};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use log::{debug, error, info, warn};
@@ -8,9 +9,76 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Audio format constants
-const SAMPLE_RATE: u32 = 16000;
+pub(super) const SAMPLE_RATE: u32 = 16000;
 const CHANNELS: u16 = 1;
 const SAMPLE_WIDTH: u16 = 2; // 16-bit
+const PREVIEW_LIMIT: usize = 12 * SAMPLE_RATE as usize;
+const FIRST_PREVIEW_STEP: usize = SAMPLE_RATE as usize * 55 / 100;
+// Allow enough new speech for a useful hypothesis before decoding the phrase again.
+const PREVIEW_STEP: usize = SAMPLE_RATE as usize * 4 / 5;
+
+pub struct PreviewAudio {
+    pub end: usize,
+    pub complete: bool,
+    /// Empty for a quiet span; the live cursor may advance without an ASR call.
+    pub wav: Vec<u8>,
+}
+
+impl PreviewAudio {
+    pub fn next_start_after_quiet(&self, start: usize) -> usize {
+        // Retain 100 ms of pre-roll for a soft onset at the end of the quiet span.
+        self.end
+            .saturating_sub(SAMPLE_RATE as usize / 10)
+            .max(start)
+    }
+}
+
+// Short clips of microphone room tone can produce invented words from a
+// batch recognizer. This very low floor applies only to live hypotheses.
+fn preview_has_signal(samples: &[i16]) -> bool {
+    let frame_size = SAMPLE_RATE as usize / 50;
+    samples.chunks(frame_size).any(|frame| {
+        let energy = frame
+            .iter()
+            .map(|&sample| i32::from(sample).abs())
+            .sum::<i32>();
+        energy >= 12 * frame.len() as i32
+    })
+}
+
+// A partial is always decoded from the start of its phrase. After speech,
+// 400 ms of low energy ends the phrase; keep that pause in the submitted WAV.
+fn preview_boundary(samples: &[i16]) -> (usize, bool) {
+    const RATE: usize = SAMPLE_RATE as usize;
+    const FRAME: usize = RATE / 50; // 20 ms
+    let count = samples.len().min(PREVIEW_LIMIT);
+    let mut loudest = 0;
+    let mut quiet_frames = 0;
+    let mut quietest_tail = i32::MAX;
+    let mut tail_cut = PREVIEW_LIMIT;
+    for (index, frame) in samples[..count].chunks_exact(FRAME).enumerate() {
+        let energy = frame.iter().map(|&s| i32::from(s).abs()).sum::<i32>() / FRAME as i32;
+        let end = (index + 1) * FRAME;
+        if loudest > 0 && energy <= (loudest / 8).min(200) {
+            quiet_frames += 1;
+            if quiet_frames == 20 {
+                return (end, true);
+            }
+        } else {
+            quiet_frames = 0;
+        }
+        loudest = loudest.max(energy);
+        if end >= PREVIEW_LIMIT - 2 * RATE && energy <= quietest_tail {
+            quietest_tail = energy;
+            tail_cut = end - FRAME / 2;
+        }
+    }
+    if count == PREVIEW_LIMIT {
+        (tail_cut, true)
+    } else {
+        (count, false)
+    }
+}
 
 /// Thread-safe wrapper for cpal Stream
 /// cpal::Stream doesn't implement Send/Sync, so we need to protect it with a Mutex
@@ -225,6 +293,7 @@ impl AudioRecorder {
             return Ok(());
         }
 
+        let saved_samples = initial_frames.len();
         *self.frames.lock() = initial_frames;
         self.is_recording.store(true, Ordering::SeqCst);
 
@@ -350,14 +419,15 @@ impl AudioRecorder {
             // Give the stream a short moment to produce frames before
             // accepting it, then continue with the next input device.
             std::thread::sleep(Duration::from_millis(150));
-            if frames.lock().is_empty() {
+            // On resume, the saved samples must not count as microphone input.
+            if frames.lock().len() == saved_samples {
                 warn!(
                     "Audio device '{}' produced no frames; trying fallback",
                     device_name
                 );
                 self.is_recording.store(false, Ordering::SeqCst);
                 drop(stream);
-                self.frames.lock().clear();
+                self.frames.lock().truncate(saved_samples);
                 self.is_recording.store(true, Ordering::SeqCst);
                 last_error = Some(format!("device '{}' produced no frames", device_name));
                 continue;
@@ -412,18 +482,39 @@ impl AudioRecorder {
         self.create_wav(&frames)
     }
 
-    #[allow(dead_code)]
-    pub fn wav_preview_since(&self, cursor: usize) -> Option<(usize, Vec<u8>)> {
+    pub fn sample_count(&self) -> usize {
+        self.frames.lock().len()
+    }
+
+    pub fn wav_preview_since(
+        &self,
+        start: usize,
+        last_decoded: usize,
+        first_preview: bool,
+    ) -> Option<PreviewAudio> {
         let frames = self.frames.lock();
-        let samples_per_second = SAMPLE_RATE as usize * CHANNELS as usize;
-        let available = frames.get(cursor..)?;
-        if available.len() < samples_per_second {
+        let available = frames.get(start..)?;
+        let step = if first_preview {
+            FIRST_PREVIEW_STEP
+        } else {
+            PREVIEW_STEP
+        };
+        if frames.len().saturating_sub(last_decoded.max(start)) < step {
             return None;
         }
-        let count = available.len().min(4 * samples_per_second);
-        let samples = available[..count].to_vec();
+        // Release the capture buffer before scanning for speech boundaries.
+        let samples = available[..available.len().min(PREVIEW_LIMIT)].to_vec();
         drop(frames);
-        Some((cursor + count, self.create_wav(&samples)))
+        let (count, complete) = preview_boundary(&samples);
+        Some(PreviewAudio {
+            end: start + count,
+            complete,
+            wav: if preview_has_signal(&samples[..count]) {
+                self.create_wav(&samples[..count])
+            } else {
+                Vec::new()
+            },
+        })
     }
 
     /// Check if currently recording
@@ -437,17 +528,20 @@ impl AudioRecorder {
     /// Get current audio level (0.0 - 1.0)
     pub fn get_audio_level(&self) -> f32 {
         let frames = self.frames.lock();
-        if frames.is_empty() {
-            return 0.0;
-        }
+        let start = frames.len().saturating_sub(WINDOW_SAMPLES);
+        meter::level(&frames[start..])
+    }
 
-        // Get last 1024 samples
-        let start = frames.len().saturating_sub(1024);
-        let samples = &frames[start..];
-
-        let sum: i64 = samples.iter().map(|&s| (s as i64).abs()).sum();
-        let avg = sum as f32 / samples.len() as f32;
-        (avg / 32768.0).min(1.0)
+    pub fn voice_activity(&self) -> VoiceActivity {
+        let mut window = [0; WINDOW_SAMPLES];
+        let length = {
+            let frames = self.frames.lock();
+            let tail = &frames[frames.len().saturating_sub(WINDOW_SAMPLES)..];
+            window[..tail.len()].copy_from_slice(tail);
+            tail.len()
+        };
+        // Release the audio capture lock before running pitch estimation.
+        VoiceActivity::from_pcm(&window[..length])
     }
 
     /// Get raw PCM data (for streaming)
@@ -597,21 +691,66 @@ mod tests {
     }
 
     #[test]
-    fn preview_snapshots_encode_bounded_audio_without_removing_it_from_the_recording() {
+    fn preview_redecodes_the_whole_phrase_and_finishes_at_a_pause() {
         let recorder = AudioRecorder::new_with_name(None, None, 1.0).unwrap();
         let second = SAMPLE_RATE as usize;
-        recorder.frames.lock().extend(vec![100; second - 1]);
-        assert!(recorder.wav_preview_since(0).is_none());
-
-        recorder.frames.lock().resize(5 * second, 200);
-        let (next, first) = recorder.wav_preview_since(0).unwrap();
-        let (end, second_chunk) = recorder.wav_preview_since(next).unwrap();
+        recorder
+            .frames
+            .lock()
+            .resize(super::FIRST_PREVIEW_STEP - 1, 100);
+        assert!(recorder.wav_preview_since(0, 0, true).is_none());
+        recorder
+            .frames
+            .lock()
+            .resize(super::FIRST_PREVIEW_STEP, 100);
+        assert!(recorder.wav_preview_since(0, 0, false).is_none());
+        let partial = recorder.wav_preview_since(0, 0, true).unwrap();
+        assert!(!partial.complete);
+        assert_eq!(partial.end, super::FIRST_PREVIEW_STEP);
+        assert!(recorder.wav_preview_since(0, partial.end, false).is_none());
+        recorder.frames.lock().resize(second, 100);
+        assert!(recorder.wav_preview_since(0, partial.end, false).is_none());
+        recorder.frames.lock().resize(2 * second, 200);
+        recorder.frames.lock().resize(3 * second, 0);
+        recorder.frames.lock().resize(5 * second, 500);
+        let first = recorder.wav_preview_since(0, partial.end, false).unwrap();
+        let next = recorder
+            .wav_preview_since(first.end, first.end, false)
+            .unwrap();
         let full = recorder.wav_snapshot();
-        assert_eq!(next, 4 * second);
-        assert_eq!(end, 5 * second);
-        assert_eq!(&first[44..], &full[44..44 + 2 * next]);
-        assert_eq!(&second_chunk[44..], &full[44 + 2 * next..]);
-        assert!(recorder.wav_preview_since(end).is_none());
+        assert!(first.complete);
+        assert_eq!(first.end, 2 * second + second * 2 / 5);
+        assert_eq!(&first.wav[44..], &full[44..44 + 2 * first.end]);
+        assert!(!next.complete);
+        assert_eq!(&next.wav[44..], &full[44 + 2 * first.end..]);
+    }
+
+    #[test]
+    fn room_tone_is_skipped_only_in_preview() {
+        let recorder = AudioRecorder::new_with_name(None, None, 1.0).unwrap();
+        recorder.frames.lock().resize(super::PREVIEW_STEP, 3);
+        let quiet = recorder.wav_preview_since(0, 0, true).unwrap();
+        assert!(quiet.wav.is_empty());
+        recorder.frames.lock().resize(super::PREVIEW_STEP * 2, 20);
+        let start = quiet.next_start_after_quiet(0);
+        let voice = recorder.wav_preview_since(start, quiet.end, true).unwrap();
+        assert!(!voice.wav.is_empty());
+        assert_eq!(&voice.wav[44..46], &3i16.to_le_bytes());
+        let full = recorder.wav_snapshot();
+        assert_eq!(full.len(), 44 + 4 * super::PREVIEW_STEP);
+        assert_eq!(&full[44..46], &3i16.to_le_bytes());
+    }
+
+    #[test]
+    fn long_preview_uses_a_quiet_boundary_within_the_time_limit() {
+        let second = SAMPLE_RATE as usize;
+        let mut samples = vec![4000; 13 * second];
+        let frame = second / 50;
+        samples[11 * second..11 * second + frame].fill(5);
+        assert_eq!(
+            super::preview_boundary(&samples),
+            (11 * second + frame / 2, true)
+        );
     }
 
     #[test]

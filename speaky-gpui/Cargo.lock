@@ -5337,6 +5337,7 @@ dependencies = [
  "byteorder",
  "cpal",
  "dirs 5.0.1",
+ "embed-resource",
  "embed_plist",
  "flate2",
  "futures-util",
@@ -5353,7 +5354,10 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
+ "unicode-segmentation",
  "uuid",
+ "windows 0.61.3",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -55,12 +55,12 @@ pub struct AsrConfig {
     pub hotkey: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_toggle_hotkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_toggle_hotkey: Option<String>,
     #[serde(default = "default_hold_time")]
     pub hotkey_hold_time: f64,
     #[serde(default = "default_language")]
     pub language: String,
-    #[serde(default = "default_streaming_mode")]
-    pub streaming_mode: bool,
     #[serde(default)]
     pub audio_device: Option<u32>,
     /// Stable device label used to recover the selection when ALSA/PipeWire
@@ -84,9 +84,6 @@ fn default_hold_time() -> f64 {
 fn default_language() -> String {
     "auto".to_string()
 }
-fn default_streaming_mode() -> bool {
-    true
-}
 fn default_audio_gain() -> f64 {
     1.0
 }
@@ -99,9 +96,9 @@ impl Default for AsrConfig {
         Self {
             hotkey: default_hotkey(),
             macos_toggle_hotkey: None,
+            windows_toggle_hotkey: None,
             hotkey_hold_time: default_hold_time(),
             language: default_language(),
-            streaming_mode: default_streaming_mode(),
             audio_device: None,
             audio_device_name: None,
             audio_gain: default_audio_gain(),
@@ -156,18 +153,24 @@ impl LlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopConfig {
-    #[serde(default = "default_auto_start")]
+    #[serde(default = "desktop_default_on")]
     pub auto_start: bool,
+    #[serde(default = "desktop_default_on")]
+    pub windows_floating_button: bool,
+    #[serde(default)]
+    pub preload_local_model: bool,
 }
 
-fn default_auto_start() -> bool {
+fn desktop_default_on() -> bool {
     true
 }
 
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
-            auto_start: default_auto_start(),
+            auto_start: desktop_default_on(),
+            windows_floating_button: desktop_default_on(),
+            preload_local_model: false,
         }
     }
 }
@@ -269,6 +272,31 @@ impl Default for OpenAIConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RemoteService {
+    pub address: String,
+    pub endpoint: String,
+    pub protocol: crate::engines::Protocol,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl RemoteService {
+    fn is_empty(&self) -> bool {
+        self.address.is_empty() && self.endpoint.is_empty()
+    }
+
+    pub fn label(&self) -> String {
+        if self.model.is_empty() {
+            self.protocol.label().to_owned()
+        } else {
+            self.model.clone()
+        }
+    }
+}
+
 /// Engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
@@ -278,6 +306,11 @@ pub struct EngineConfig {
     pub volc_bigmodel: VolcBigModelConfig,
     #[serde(default)]
     pub openai: OpenAIConfig,
+    #[serde(default, skip_serializing_if = "RemoteService::is_empty")]
+    pub(crate) remote: RemoteService,
+    /// Last selected on-device recognizer, kept separately from external services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_pack: Option<String>,
 }
 
 fn default_engine() -> String {
@@ -290,6 +323,8 @@ impl Default for EngineConfig {
             current: default_engine(),
             volc_bigmodel: VolcBigModelConfig::default(),
             openai: OpenAIConfig::default(),
+            remote: RemoteService::default(),
+            local_pack: None,
         }
     }
 }
@@ -354,9 +389,17 @@ impl Config {
     }
     /// Get the config directory path
     pub fn config_dir() -> PathBuf {
-        dirs::config_dir()
+        if let Some(directory) = std::env::var_os("SPEAKY_CONFIG_DIR").filter(|p| !p.is_empty()) {
+            return PathBuf::from(directory);
+        }
+        let directory = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("speaky")
+            .join("speaky");
+        // The legacy Windows client uses the same case-insensitive directory
+        // for an incompatible config.yaml and history.json.
+        #[cfg(windows)]
+        let directory = directory.join("gpui");
+        directory
     }
 
     /// Get the config file path
@@ -392,7 +435,8 @@ impl Config {
         info!("Saving config to {:?}", path);
 
         let content = serde_yaml::to_string(self).map_err(|e| ConfigError::parse_error(e))?;
-        fs::write(&path, content).map_err(|e| ConfigError::write_error(e))?;
+        crate::drafts::write_atomically(&path, content.as_bytes())
+            .map_err(ConfigError::write_error)?;
         info!("Config saved successfully");
         Ok(())
     }

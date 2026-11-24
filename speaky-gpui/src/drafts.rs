@@ -10,6 +10,8 @@ pub struct Entry {
     pub modified: Option<SystemTime>,
     pub duration_seconds: u64,
     pub state: State,
+    pub recognized_at: Option<SystemTime>,
+    pub recognizer: Option<String>,
     pub organized: Option<Organized>,
 }
 
@@ -33,7 +35,19 @@ pub enum State {
     },
 }
 
-fn directory() -> PathBuf {
+#[derive(Default, Deserialize, Serialize)]
+struct Transcript {
+    #[serde(flatten)]
+    state: State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recognized_at: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recognizer: Option<String>,
+}
+
+pub(super) fn directory() -> PathBuf {
     crate::config::Config::config_dir().join("drafts")
 }
 
@@ -51,6 +65,59 @@ pub fn save(path: &Path, audio: &[u8]) -> io::Result<()> {
 pub fn set_state(path: &Path, state: State) -> io::Result<()> {
     let metadata = serde_json::to_vec(&state).map_err(io::Error::other)?;
     write_atomically(&path.with_extension("json"), &metadata)
+}
+
+fn read_transcript(path: &Path) -> io::Result<Transcript> {
+    let sidecar = path.with_extension("json");
+    let mut transcript: Transcript =
+        serde_json::from_slice(&fs::read(&sidecar)?).map_err(io::Error::other)?;
+    if transcript.recognized_at.is_none() {
+        transcript.recognized_at = fs::metadata(sidecar).and_then(|m| m.modified()).ok();
+    }
+    Ok(transcript)
+}
+
+fn save_transcript(path: &Path, transcript: &Transcript) -> io::Result<()> {
+    let bytes = serde_json::to_vec(transcript).map_err(io::Error::other)?;
+    write_atomically(&path.with_extension("json"), &bytes)
+}
+
+pub(super) fn record(
+    path: &Path,
+    text: &str,
+    when: SystemTime,
+    recognizer: Option<&str>,
+) -> io::Result<()> {
+    let previous = match read_transcript(path) {
+        Ok(old) => Some(old),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let original_text = previous.and_then(|old| match old.state {
+        State::Transcribed { text } => Some(old.original_text.unwrap_or(text)),
+        _ => None,
+    });
+    let transcript = Transcript {
+        state: State::Transcribed { text: text.into() },
+        recognized_at: Some(when),
+        recognizer: recognizer.map(str::to_owned),
+        original_text,
+    };
+    save_transcript(path, &transcript)
+}
+
+pub(super) fn edit(path: &Path, expected: &str, edited: &str) -> io::Result<()> {
+    let mut transcript = read_transcript(path)?;
+    if !matches!(&transcript.state, State::Transcribed { text } if text == expected) {
+        return Err(io::Error::other("转写内容已变化，请重新打开后修改。"));
+    }
+    transcript
+        .original_text
+        .get_or_insert_with(|| expected.into());
+    transcript.state = State::Transcribed {
+        text: edited.into(),
+    };
+    save_transcript(path, &transcript)
 }
 
 pub fn save_organized(path: &Path, result: &Organized) -> io::Result<()> {
@@ -86,7 +153,7 @@ pub fn list() -> Vec<Entry> {
     list_in(&directory())
 }
 
-fn list_in(directory: &Path) -> Vec<Entry> {
+pub(super) fn list_in(directory: &Path) -> Vec<Entry> {
     let Ok(entries) = fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -106,10 +173,7 @@ fn list_in(directory: &Path) -> Vec<Entry> {
     drafts
         .into_iter()
         .map(|(modified, path, bytes)| {
-            let state = fs::read(path.with_extension("json"))
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .unwrap_or_default();
+            let transcript = read_transcript(&path).unwrap_or_default();
             let organized = fs::read(path.with_extension("polish.json"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
@@ -117,7 +181,9 @@ fn list_in(directory: &Path) -> Vec<Entry> {
                 path,
                 modified,
                 duration_seconds: (bytes - 44) / (16_000 * 2),
-                state,
+                state: transcript.state,
+                recognized_at: transcript.recognized_at,
+                recognizer: transcript.recognizer,
                 organized,
             }
         })
@@ -165,12 +231,18 @@ mod tests {
 
     #[test]
     fn a_completed_snapshot_replaces_the_previous_one() {
+        use std::io::Read;
         let directory = std::env::temp_dir().join(format!("speaky-{}", uuid::Uuid::new_v4()));
         let path = directory.join("test.wav");
         save(&path, b"first snapshot").unwrap();
+        let mut old_reader = fs::File::open(&path).unwrap();
         save(&path, b"second").unwrap();
         save(&path, b"").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"second");
+        let mut old_bytes = Vec::new();
+        old_reader.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, b"first snapshot");
+        drop(old_reader);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         fs::remove_dir_all(directory).unwrap();
     }
