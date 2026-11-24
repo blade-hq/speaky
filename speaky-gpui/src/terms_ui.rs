@@ -1,7 +1,5 @@
 type EditResult = tokio::sync::oneshot::Receiver<Result<Option<String>, String>>;
 
-#[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs)]
 pub fn edit(window: &mut gpui::Window, current: &str) -> Result<EditResult, String> {
     edit_text(
         window,
@@ -159,7 +157,14 @@ unsafe impl objc::Encode for Rect {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn edit(_: &mut gpui::Window, _: &str) -> Result<EditResult, String> {
-    Err("常用词编辑器当前仅支持 macOS。".into())
+#[cfg(windows)]
+pub fn edit_text(
+    window: &mut gpui::Window,
+    current: &str,
+    title: &str,
+    detail: &str,
+) -> Result<EditResult, String> {
+    crate::windows_dialog::edit(window, 102, title, detail, [current.to_owned()], |[text]| {
+        text
+    })
 }

@@ -10,9 +10,13 @@ permissions:
   contents: read
 
 jobs:
-  macos:
-    name: macOS GPUI
-    runs-on: macos-15
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    name: GPUI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -23,4 +27,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
-      - run: cargo build --locked
+      - if: runner.os == 'macOS'
+        run: cargo build --locked
+      - if: runner.os == 'Windows'
+        name: Build portable Windows client
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+              Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (!$fxc) { throw 'Windows SDK fxc.exe is required for the release build.' }
+          $env:GPUI_FXC_PATH = $fxc.FullName
+          cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ../scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output ../Speaky-Windows-x64.zip
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Speaky-Windows-x64
+          path: Speaky-Windows-x64.zip
+          if-no-files-found: error

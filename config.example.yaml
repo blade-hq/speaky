@@ -1,8 +1,13 @@
-# 可复制到 ~/Library/Application Support/speaky/config.yaml，
-# 或通过应用内的「设置」配置识别服务。
+# 可通过应用内的「设置」配置识别服务，也可将此文件复制到相应位置。
+# Windows: %APPDATA%\speaky\gpui\config.yaml
+# macOS: ~/Library/Application Support/speaky/config.yaml
 core:
   asr:
     language: auto
+
+desktop:
+  # Windows 本地识别模型的启动预加载
+  preload_local_model: false
 
 engine:
   current: openai

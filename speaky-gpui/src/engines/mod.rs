@@ -1,7 +1,12 @@
+mod detect;
 mod openai;
+mod remote;
 mod volcengine;
 
+pub(crate) use detect::{check_service, detect_service};
+pub(crate) use openai::loopback;
 pub use openai::OpenAIEngine;
+pub(crate) use remote::{Protocol, RemoteEngine};
 pub use volcengine::{VolcBigModelEngine, VolcRealtimeSession};
 
 use crate::config::Config;
@@ -15,6 +20,12 @@ pub type PartialResultCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Result type for engine operations
 pub type EngineResult = Result<String, EngineError>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptionPass {
+    Preview,
+    Final,
+}
 
 /// Errors that can occur during engine operations
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +97,7 @@ pub trait Engine: Send + Sync {
         audio_data: &[u8],
         language: &str,
         _vocabulary: &[&str],
+        _pass: TranscriptionPass,
     ) -> EngineResult {
         self.transcribe(audio_data, language)
     }
@@ -120,6 +132,50 @@ pub trait Engine: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+}
+
+pub(crate) fn uses_local_asr(config: &Config) -> bool {
+    #[cfg(windows)]
+    if crate::local_models::selected_id(config).is_some() {
+        return true;
+    }
+    config.engine.current == "local"
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn routes_the_bundled_legacy_qwen_endpoint_through_the_gpu_manager() {
+    let mut config = Config::default();
+    config.engine.current = "openai".into();
+    config.engine.openai.model = "Qwen3-ASR-0.6B".into();
+    config.engine.openai.base_url = "http://127.0.0.1:18107/v1/".into();
+    assert!(uses_local_asr(&config));
+    config.engine.openai.base_url = "http://127.0.0.1:8201/v1".into();
+    assert!(!uses_local_asr(&config));
+}
+
+pub fn recognition_engine(config: &Config) -> Result<Box<dyn Engine + Send + Sync>, String> {
+    if config.engine.current == "remote" {
+        return Ok(Box::new(configured_remote(config)?));
+    }
+    if let Some(framework) = crate::config::Framework::selected(config) {
+        return Ok(Box::new(OpenAIEngine::from_framework(framework, config)?));
+    }
+    #[cfg(windows)]
+    if uses_local_asr(config) {
+        return Ok(Box::new(crate::local_models::ready_engine(config)?));
+    }
+    create_engine(config).ok_or_else(|| "请先配置语音识别服务。".to_owned())
+}
+
+fn configured_remote(config: &Config) -> Result<RemoteEngine, String> {
+    let service = &config.engine.remote;
+    RemoteEngine::new(
+        service.protocol,
+        &service.endpoint,
+        &service.model,
+        &service.api_key,
+    )
 }
 
 /// Create an engine based on configuration
@@ -159,12 +215,7 @@ pub fn create_engine(config: &Config) -> Option<Box<dyn Engine + Send + Sync>> {
             }
         }
         "openai" => {
-            let engine = OpenAIEngine::new(
-                &config.engine.openai.api_key,
-                &config.engine.openai.model,
-                &config.engine.openai.base_url,
-            )
-            .with_vocabulary_prompt(config.engine.openai.use_vocabulary_prompt);
+            let engine = OpenAIEngine::from_service(&config.engine.openai);
             if engine.is_available() {
                 info!(
                     "Using OpenAI engine (model: {})",
