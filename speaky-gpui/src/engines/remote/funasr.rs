@@ -1,4 +1,4 @@
-use super::{status_error, EngineError, EngineResult};
+use super::{http_status_error, EngineError, EngineResult};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{header::HeaderValue, Url};
 use serde::Deserialize;
@@ -66,7 +66,7 @@ fn handshake(
 
 fn ws_error(error: Error) -> EngineError {
     match error {
-        Error::Http(response) => status_error(response.status().as_u16()),
+        Error::Http(response) => http_status_error(response.status().as_u16()),
         Error::Tls(_) => {
             EngineError::NetworkError("WebSocket TLS 连接失败，请检查证书和地址。".into())
         }

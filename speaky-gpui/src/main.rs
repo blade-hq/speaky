@@ -1,10 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod audio;
-#[cfg(windows)]
-mod benchmark;
-#[cfg(windows)]
-mod benchmark_ui;
 mod config;
 mod correction_ui;
 #[cfg(windows)]
@@ -16,9 +12,7 @@ mod floating_control;
 mod history;
 mod hotkey;
 mod icons;
-#[cfg(windows)]
-mod local_models;
-#[cfg(windows)]
+mod model_packs;
 mod model_picker;
 mod onboarding;
 mod overlay;
@@ -71,8 +65,6 @@ enum Page {
     History,
     Terms,
     Settings,
-    #[cfg(windows)]
-    Benchmark,
 }
 
 gpui::actions!(
@@ -245,10 +237,7 @@ struct Speaky {
     transcript_scroll: ScrollHandle,
     page: Page,
     tour: onboarding::Tour,
-    #[cfg(windows)]
     model_picker: model_picker::ModelPicker,
-    #[cfg(windows)]
-    benchmark: benchmark_ui::BenchmarkPage,
     archive: Vec<drafts::Entry>,
     saved_recording: Option<PathBuf>,
     unsaved: Option<PendingSave>,
@@ -278,7 +267,6 @@ impl Speaky {
         cx: &mut Context<Self>,
     ) -> Self {
         let config = config::Config::load();
-        #[cfg(windows)]
         let model_picker = model_picker::ModelPicker::new(config.as_ref().ok());
         let organizer = config.unwrap_or_default().llm;
         let archive = drafts::list();
@@ -293,10 +281,7 @@ impl Speaky {
             transcript_scroll: ScrollHandle::new(),
             page: Page::Home,
             tour: onboarding::Tour::load(cx),
-            #[cfg(windows)]
             model_picker,
-            #[cfg(windows)]
-            benchmark: benchmark_ui::BenchmarkPage::default(),
             archive,
             saved_recording: None,
             unsaved: None,
@@ -323,17 +308,8 @@ impl Speaky {
         }
     }
 
-    #[cfg(not(windows))]
-    pub(crate) fn local_model_switching(&self) -> bool {
-        false
-    }
-
     fn recognition_model_busy(&self) -> bool {
         if self.correction.busy {
-            return true;
-        }
-        #[cfg(windows)]
-        if self.benchmark.is_running() {
             return true;
         }
         self.local_model_switching()
@@ -416,7 +392,6 @@ impl Speaky {
         {
             return;
         }
-        #[cfg(windows)]
         self.model_picker.close();
         // Bind the destination at the user's shortcut or floating-button press.
         // The UIA worker can resolve the editor while the microphone opens.
@@ -568,8 +543,6 @@ impl Speaky {
                 State::Busy("待保存录音")
             } else if self.correction.busy {
                 State::Busy("保存修改中")
-            } else if self.benchmark.is_running() {
-                State::Busy("模型评测中")
             } else if self.local_model_switching() {
                 State::Busy("切换模型中")
             } else if self.floating_retry {
@@ -606,10 +579,6 @@ impl Speaky {
 
     fn stop_playback(&mut self) {
         self.playback = None;
-        #[cfg(windows)]
-        {
-            self.benchmark.playing = false;
-        }
     }
 
     fn checkpoint(&mut self, cx: &mut Context<Self>) {
@@ -747,10 +716,7 @@ impl Speaky {
         cx: &mut Context<Self>,
     ) {
         let audio::PreviewAudio { end, complete, wav } = chunk;
-        #[cfg(windows)]
-        {
-            self.model_picker.pending_previews += 1;
-        }
+        self.model_picker.pending_previews += 1;
         let task = cx.background_spawn(async move {
             let config = config::Config::load().map_err(|error| error.to_string())?;
             let engine = engines::recognition_engine(&config)?;
@@ -765,12 +731,9 @@ impl Speaky {
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
-                #[cfg(windows)]
-                {
-                    view.model_picker.pending_previews -= 1;
-                    if view.model_picker.pending_previews == 0 && view.recording.is_none() {
-                        cx.notify();
-                    }
+                view.model_picker.pending_previews -= 1;
+                if view.model_picker.pending_previews == 0 && view.recording.is_none() {
+                    cx.notify();
                 }
                 let Some(recording) = view.recording.as_mut().filter(|recording| {
                     recording.draft == draft && recording.preview_pending == Some(generation)
@@ -819,7 +782,6 @@ impl Speaky {
         {
             return;
         }
-        #[cfg(windows)]
         self.model_picker.close();
         self.transcribing = true;
         self.stop_playback();
@@ -881,57 +843,6 @@ impl Speaky {
                     }
                     Err(error) => view.status = error,
                 }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    #[cfg(windows)]
-    fn compare_recording(&mut self, draft: PathBuf, cx: &mut Context<Self>) {
-        if self.recording.is_some()
-            || self.transcribing
-            || self.unsaved.is_some()
-            || self.recognition_model_busy()
-        {
-            return;
-        }
-        self.model_picker.close();
-        self.transcribing = true;
-        self.stop_playback();
-        self.status = "正在用所选模型测试这段录音…".into();
-        let task = cx.background_spawn(async move {
-            let audio = std::fs::read(&draft).map_err(|error| error.to_string())?;
-            if is_silent_recording(&audio) {
-                return Err(SILENT_INPUT.to_owned());
-            }
-            let config = config::Config::load().map_err(|error| error.to_string())?;
-            let engine = engines::recognition_engine(&config)?;
-            let model = engine.name().to_owned();
-            let text = terms::transcribe(
-                engine.as_ref(),
-                &audio,
-                &config.core.asr.language,
-                engines::TranscriptionPass::Final,
-            )
-            .map_err(|error| error.to_string())?;
-            if text.trim().is_empty() {
-                return Err("未识别到文字。".to_owned());
-            }
-            drafts::save_comparison(&draft, &model, &text)
-                .map_err(|error| format!("保存模型测试结果失败：{error}"))?;
-            Ok::<_, String>(model)
-        });
-        cx.spawn(async move |entity, cx| {
-            let result = task.await;
-            let _ = entity.update(cx, |view, cx| {
-                view.transcribing = false;
-                view.archive = drafts::list();
-                view.status = match result {
-                    Ok(model) => format!("{model} 的测试结果已显示在录音下方。"),
-                    Err(error) => format!("模型测试失败：{error}"),
-                };
                 cx.notify();
             });
         })
@@ -1251,7 +1162,6 @@ impl Speaky {
                         )),
                 ),
             );
-        #[cfg(windows)]
         let controls = controls.child(
             div()
                 .relative()
@@ -1447,13 +1357,6 @@ impl Speaky {
                 "个人词库",
                 "补充人名、项目名和常用写法。",
             ),
-            #[cfg(windows)]
-            (
-                Page::Benchmark,
-                Icon::Benchmark,
-                "模型评测",
-                "用测试样本比较识别效果。",
-            ),
             (
                 Page::Settings,
                 Icon::Settings,
@@ -1511,31 +1414,10 @@ impl Speaky {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(page_heading(
-                        "录音历史",
-                        "回听原音、编辑转写，或用其他模型重新识别。",
-                    ))
-                    .when(cfg!(windows), |heading| {
-                        #[cfg(windows)]
-                        {
-                            heading.child(self.model_picker_button(cx))
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            heading
-                        }
-                    }),
+                    .child(page_heading("录音历史", "回听原音、编辑和复制转写。"))
+                    .child(self.model_picker_button(cx)),
             )
-            .when(cfg!(windows), |body| {
-                #[cfg(windows)]
-                {
-                    body.children(self.model_picker_panel(cx))
-                }
-                #[cfg(not(windows))]
-                {
-                    body
-                }
-            })
+            .children(self.model_picker_panel(cx))
             .when(self.transcribing, |body| {
                 body.child(div().text_color(rgb(MUTED)).child("正在转写…"))
             })
@@ -1622,19 +1504,7 @@ impl Speaky {
                                         })
                                         .when_some(text.as_deref(), |body, source| {
                                             body.child(self.organized_result(entry, source, cx))
-                                        })
-                                        .children(entry.comparisons.iter().map(|comparison| {
-                                            div()
-                                                .mt_1()
-                                                .p_2()
-                                                .rounded_md()
-                                                .bg(rgb(SIDEBAR))
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .child(settings::detail(comparison.model.clone()))
-                                                .child(comparison.text.clone())
-                                        })),
+                                        }),
                                 )
                                 .when_some(text.as_deref(), |row, source| {
                                     row.children(self.correction_button(
@@ -1643,20 +1513,6 @@ impl Speaky {
                                         source,
                                         cx,
                                     ))
-                                })
-                                .when(!self.recognition_model_busy(), |row| {
-                                    let compare = entry.path.clone();
-                                    row.child(
-                                        button("测试模型", false)
-                                            .id(("compare-recording", index))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |view, _, _, cx| {
-                                                    #[cfg(windows)]
-                                                    view.compare_recording(compare.clone(), cx);
-                                                }),
-                                            ),
-                                    )
                                 })
                                 .child(
                                     history_actions()
@@ -1935,7 +1791,6 @@ impl Render for Speaky {
             }
             _ => (self.status.as_str(), MUTED),
         };
-        #[cfg(windows)]
         let (status, status_color) = self
             .model_picker
             .switching_notice()
@@ -1951,8 +1806,6 @@ impl Render for Speaky {
             })
             .unwrap_or((status, status_color));
         let show_playback = self.playback.is_some();
-        #[cfg(windows)]
-        let show_playback = show_playback && !self.benchmark.playing;
         div()
             .size_full()
             .relative()
@@ -1993,8 +1846,6 @@ impl Render for Speaky {
                             (Page::Home, "工作台", Icon::Home),
                             (Page::History, "录音历史", Icon::History),
                             (Page::Terms, "词库", Icon::Terms),
-                            #[cfg(windows)]
-                            (Page::Benchmark, "模型评测", Icon::Benchmark),
                         ]
                         .map(|(page, label, icon)| self.nav_item(page, label, icon, cx)),
                     )
@@ -2095,8 +1946,6 @@ impl Render for Speaky {
                             .child(match self.page {
                                 Page::Home => self.home(wide, cx),
                                 Page::History => self.history_page(cx),
-                                #[cfg(windows)]
-                                Page::Benchmark => self.benchmark_page(cx),
                                 Page::Terms => self.terms_page(wide, cx),
                                 Page::Settings => self.settings_page(cx),
                             }),
@@ -2145,10 +1994,6 @@ fn main() {
                     });
                     cx.new(|cx| {
                         let startup_config = config::Config::load();
-                        #[cfg(windows)]
-                        let release_gpu = startup_config.as_ref().ok().is_some_and(|c| {
-                            c.engine.current == "remote" || config::Framework::selected(c).is_some()
-                        }) && local_models::has_owned_manager();
                         let shortcut = startup_config
                             .as_ref()
                             .map(settings::selected_shortcut)
@@ -2208,12 +2053,7 @@ fn main() {
                         .detach();
                         let mut view = Speaky::new(hotkey, hotkey_status, cx);
                         view.show_first_tour(window, cx);
-                        #[cfg(any(target_os = "macos", windows))]
-                        view.resolve_framework_name(cx);
-                        #[cfg(windows)]
-                        if release_gpu {
-                            view.release_local_model(cx);
-                        } else if let Ok(config) = startup_config {
+                        if let Ok(config) = startup_config {
                             view.preload_selected_model(config, cx);
                         }
                         view
@@ -2233,7 +2073,11 @@ fn main() {
                     let _ = handle.update(cx, |_, window, _| window.remove_window());
                 }
             });
-            async {}
+            async {
+                if let Err(error) = model_packs::shutdown() {
+                    log::warn!("释放本地模型失败：{error}");
+                }
+            }
         })
         .detach();
         cx.on_action(move |_: &OpenSettings, cx| {

@@ -1,6 +1,6 @@
 # Speaky 桌面版使用指南
 
-在仓库根目录运行 `cargo run --locked --manifest-path speaky-gpui/Cargo.toml`。Windows 首次编译后还可双击仓库根目录的 `start-windows.cmd`。本地 Qwen3-ASR 和麦克风配置见 [Windows 本地运行](../docs/Windows本地运行.md)。
+在仓库根目录运行 `cargo run --locked --manifest-path speaky-gpui/Cargo.toml`。Windows 首次编译后还可双击仓库根目录的 `start-windows.cmd`。离线模型包、外部服务和麦克风配置见 [Windows 本地运行](../docs/Windows本地运行.md)。
 
 在「设置 → 录音 → 全局快捷键」录入想用的按键，例如 `F8` 或 `Ctrl+Shift+R`。按一次立即开始录音，松开后可以继续说话，再按一次停止并保存。持续按住只触发一次。Windows 的初始快捷键是 `Ctrl+Shift+空格`，macOS 是 `⌥⇧Space`。
 

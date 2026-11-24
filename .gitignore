@@ -1,11 +1,8 @@
-/speaky-gpui/target/
 config.yaml
-/ASR-Models/
-/ASR-Tests/
-/models/
-/scripts/whisper_gpu_bridge.dll
+/packs/
+/speaky-gpui/target/
+/Speaky-macOS.zip
 /Speaky-Windows-x64.zip
-__pycache__/
 
 # IDE
 .vscode/

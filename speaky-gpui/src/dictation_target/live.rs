@@ -87,21 +87,11 @@ impl Editor {
                     &range,
                     TextPatternRangeEndpoint_End,
                 ))?;
-                let mut selection = Selection {
+                let selection = Selection {
                     before: contents(readable(before.GetText(-1))?)?,
                     selected: contents(readable(range.GetText(-1))?)?,
                     after: contents(readable(after.GetText(-1))?)?,
                 };
-                // Codex may report its caret after the CSS hint even though the
-                // editor is empty. Recognize the hint anywhere around that caret.
-                if selection.selected.is_empty()
-                    && editor.displays_placeholder(
-                        &[selection.before.as_str(), selection.after.as_str()].concat(),
-                    )
-                {
-                    selection.before.clear();
-                    selection.after.clear();
-                }
                 return Ok(selection);
             }
         }

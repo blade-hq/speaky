@@ -4,8 +4,6 @@ use gpui::{canvas, point, prelude::*, px, rgb, PathBuilder};
 pub enum Icon {
     Home,
     History,
-    #[cfg(windows)]
-    Benchmark,
     Terms,
     Settings,
     Play,
@@ -74,14 +72,6 @@ impl Icon {
                 ],
                 &[(2., 2.5), (2., 5.5), (5., 5.5)],
                 &[(8., 4.5), (8., 8.), (10.5, 9.5)],
-            ],
-            #[cfg(windows)]
-            Self::Benchmark => &[
-                &[(2., 7.), (2., 9.)],
-                &[(5., 4.5), (5., 11.5)],
-                &[(8., 2.), (8., 14.)],
-                &[(11., 5.), (11., 11.)],
-                &[(14., 6.5), (14., 9.5)],
             ],
             Self::Terms => &[
                 &[

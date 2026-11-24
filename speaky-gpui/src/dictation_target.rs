@@ -336,8 +336,7 @@ impl AutomationEditor {
             let options: IUIAutomation2 = readable(client.cast())?;
             readable(options.SetConnectionTimeout(500))?;
             readable(options.SetTransactionTimeout(500))?;
-            let field =
-                codex::focused_or_composer(&client, readable(client.GetFocusedElement())?, focus)?;
+            let field = readable(client.GetFocusedElement())?;
             let editor = Self { client, field };
             editor
                 .require_writable()
@@ -443,56 +442,14 @@ impl AutomationEditor {
             .is_ok_and(|id| id.to_string().eq_ignore_ascii_case("Chrome"))
     }
 
-    // Codex exposes the paragraph's CSS placeholder and trailing <br> as
-    // the value of an empty editor. A matching string alone could be a real draft.
-    fn displays_placeholder(&self, document: &str) -> bool {
-        let Some(label) = document.strip_suffix('\n').filter(|s| !s.is_empty()) else {
-            return false;
-        };
-        unsafe {
-            let matches = || -> Option<bool> {
-                let class = self.field.CurrentClassName().ok()?.to_string();
-                if !class.split_ascii_whitespace().any(|s| s == "ProseMirror")
-                    || self.field.CurrentName().ok()?.to_string() != label
-                {
-                    return Some(false);
-                }
-                let walker = self.client.RawViewWalker().ok()?;
-                let paragraph = walker.GetFirstChildElement(&self.field).ok()?;
-                let class = paragraph.CurrentClassName().ok()?.to_string();
-                if paragraph.CurrentControlType().ok()? != UIA_GroupControlTypeId
-                    || !class.split_ascii_whitespace().any(|s| s == "placeholder")
-                    || !class
-                        .split_ascii_whitespace()
-                        .any(|s| s == "before:composer-placeholder")
-                {
-                    return Some(false);
-                }
-                let pattern: IUIAutomationTextPattern =
-                    self.field.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
-                let span = pattern.RangeFromChild(&paragraph).ok()?;
-                Some(contents(span.GetText(-1).ok()?).ok()? == document)
-            };
-            matches() == Some(true)
-        }
-    }
-
     fn text_value(&self) -> Result<String, String> {
-        let logical = |value| {
-            let value = contents(value)?;
-            Ok(if self.displays_placeholder(&value) {
-                String::new()
-            } else {
-                value
-            })
-        };
         unsafe {
             if let Ok(value) = self
                 .field
                 .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             {
                 if let Ok(text) = value.CurrentValue() {
-                    return logical(text);
+                    return contents(text);
                 }
             }
             if let Ok(pattern) = self
@@ -500,14 +457,14 @@ impl AutomationEditor {
                 .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
             {
                 if let Ok(text) = pattern.DocumentRange().and_then(|range| range.GetText(-1)) {
-                    return logical(text);
+                    return contents(text);
                 }
             }
             let legacy: IUIAutomationLegacyIAccessiblePattern = readable(
                 self.field
                     .GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId),
             )?;
-            logical(readable(legacy.CurrentValue())?)
+            contents(readable(legacy.CurrentValue())?)
         }
     }
 
@@ -670,9 +627,6 @@ fn unicode_packets(text: &str) -> Result<Vec<INPUT>, String> {
 
 #[path = "dictation_target/live.rs"]
 mod live;
-
-#[path = "dictation_target/codex.rs"]
-mod codex;
 
 #[path = "dictation_target/clipboard.rs"]
 mod clipboard;

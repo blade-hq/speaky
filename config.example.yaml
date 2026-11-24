@@ -1,4 +1,4 @@
-# 可通过应用内的「设置」配置识别服务，也可将此文件复制到相应位置。
+# 通常在应用内设置。手动配置时，将此文件复制为 config.yaml。
 # Windows: %APPDATA%\speaky\gpui\config.yaml
 # macOS: ~/Library/Application Support/speaky/config.yaml
 core:
@@ -6,13 +6,19 @@ core:
     language: auto
 
 desktop:
-  # Windows 本地识别模型的启动预加载
   preload_local_model: false
 
 engine:
-  current: openai
+  # local | openai | remote（应用探测并保存） | volc_bigmodel
+  current: local
+  # 填写所选离线包 manifest.json 的 id。
+  local_pack: example-asr-pack
+
   openai:
     base_url: https://api.openai.com/v1
     model: gpt-4o-transcribe
     api_key: ""
     use_vocabulary_prompt: false
+
+  volc_bigmodel:
+    api_key: ""

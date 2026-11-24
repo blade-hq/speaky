@@ -1,5 +1,5 @@
 use super::{
-    config::Config, local_models, ActionTooltip, Page, Speaky, ACCENT, BORDER, INK, MUTED, SIDEBAR,
+    config::Config, model_packs, ActionTooltip, Page, Speaky, ACCENT, BORDER, INK, MUTED, SIDEBAR,
 };
 use gpui::{div, prelude::*, px, rgb, rgba, Context, Div, Stateful};
 
@@ -7,10 +7,9 @@ use gpui::{div, prelude::*, px, rgb, rgba, Context, Div, Stateful};
 pub(super) struct ModelPicker {
     label: String,
     selected: Option<String>,
-    benchmark_model: Option<crate::benchmark::BenchmarkModel>,
     expanded: bool,
     listing: bool,
-    models: Vec<local_models::Model>,
+    models: Vec<model_packs::Pack>,
     pub(super) switching: Option<String>,
     pub(super) preloading: bool,
     preload_error: Option<String>,
@@ -27,17 +26,18 @@ impl ModelPicker {
 
     fn read_selection(&mut self, config: Option<&Config>) {
         self.label = config
-            .map(local_models::selected_label)
+            .map(model_packs::selected_label)
             .unwrap_or_else(|| "配置读取失败".into());
-        self.selected = config
-            .and_then(local_models::selected_id)
-            .map(str::to_owned);
-        self.benchmark_model = config.and_then(crate::benchmark::BenchmarkModel::selected);
+        self.selected = config.and_then(model_packs::selected_id).map(str::to_owned);
     }
 
     pub(super) fn close(&mut self) {
         self.expanded = false;
         self.error = None;
+    }
+
+    pub(super) fn label(&self) -> &str {
+        &self.label
     }
 
     pub(super) fn switching_notice(&self) -> Option<&str> {
@@ -52,14 +52,12 @@ impl ModelPicker {
         }
     }
 
-    pub(super) fn benchmark_model(&self) -> Option<&crate::benchmark::BenchmarkModel> {
-        self.benchmark_model.as_ref()
-    }
-
+    #[cfg(windows)]
     pub(super) fn guide_is_open(&self) -> bool {
         self.expanded
     }
 
+    #[cfg(windows)]
     pub(super) fn guide_has_no_models(&self) -> bool {
         self.expanded && !self.listing && self.models.is_empty()
     }
@@ -83,14 +81,14 @@ impl Speaky {
     pub(super) fn preload_selected_model(&mut self, config: Config, cx: &mut Context<Self>) {
         if !config.desktop.preload_local_model
             || self.model_picker.preloading
-            || local_models::selected_id(&config).is_none_or(|id| id.trim().is_empty())
+            || model_packs::selected_id(&config).is_none()
         {
             return;
         }
         self.model_picker.preloading = true;
         self.model_picker.preload_error = None;
         let task =
-            cx.background_spawn(async move { local_models::ready_engine(&config).map(|_| ()) });
+            cx.background_spawn(async move { model_packs::ready_engine(&config).map(|_| ()) });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
@@ -109,8 +107,6 @@ impl Speaky {
         if self.recording.is_some() || self.transcribing || self.model_picker.pending_previews != 0
         {
             Some("录音或转写结束后可切换模型")
-        } else if self.benchmark.is_running() {
-            Some("本条录音识别结束后可切换模型")
         } else if self.settings.recognition_checking() {
             Some("识别服务检查结束后可切换模型")
         } else if self.model_picker.preloading {
@@ -142,7 +138,7 @@ impl Speaky {
         if !self.model_picker.listing {
             self.model_picker.listing = true;
             self.model_picker.models.clear();
-            let scan = cx.background_spawn(async { local_models::list() });
+            let scan = cx.background_spawn(async { model_packs::list() });
             cx.spawn(async move |entity, cx| {
                 let result = scan.await;
                 let _ = entity.update(cx, |view, cx| {
@@ -153,6 +149,7 @@ impl Speaky {
                         Err(error) if picker.expanded => picker.error = Some(error),
                         Err(_) => {}
                     }
+                    #[cfg(windows)]
                     if view.tour.at(crate::onboarding::Step::Model) {
                         view.tour.model_rows_arrived();
                     }
@@ -164,34 +161,31 @@ impl Speaky {
         cx.notify();
     }
 
-    fn choose_model(&mut self, model: local_models::Model, cx: &mut Context<Self>) {
+    fn choose_model(&mut self, model: model_packs::Pack, cx: &mut Context<Self>) {
         if self.model_picker_busy() || !self.model_picker.expanded || self.model_picker.listing {
             return;
         }
         self.model_picker.close();
-        self.model_picker.switching = Some(
-            if self.model_picker.selected.as_deref() == Some(model.id.as_str()) {
-                format!("正在准备 GPU 模型 {}…", model.label)
-            } else {
-                format!("正在释放上一模型并加载 {} 到 GPU…", model.label)
-            },
-        );
-        let task = cx.background_spawn(async move { local_models::activate(&model.id) });
+        self.model_picker.switching = Some(format!("正在加载本地模型包 {}…", model.label));
+        let task = cx.background_spawn(async move {
+            model_packs::activate(&model)?;
+            if let Err(error) = crate::settings::save_local_pack(&model.id) {
+                if let Err(release_error) = model_packs::release() {
+                    log::warn!("释放本地模型失败：{release_error}");
+                }
+                return Err(error);
+            }
+            Ok::<_, String>(())
+        });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
-                let result = result.and_then(|endpoint| {
-                    if let Some(reason) = view.model_switch_blocker() {
-                        return Err(reason.into());
-                    }
-                    local_models::select(&endpoint)
-                });
                 view.model_picker.switching = None;
                 view.refresh_model_selection();
                 if let Err(error) = result {
                     view.model_picker.error = Some(format!("切换失败：{error}"));
                     view.model_picker.expanded =
-                        matches!(view.page, Page::Home | Page::Benchmark | Page::History);
+                        matches!(view.page, Page::Home | Page::Settings | Page::History);
                 } else if view.page == Page::Settings {
                     view.reload_settings();
                 }
@@ -228,7 +222,7 @@ impl Speaky {
                     .flex_none()
                     .text_color(rgb(MUTED))
                     .child(if picker.selected.is_some() {
-                        "模型 · GPU"
+                        "本地模型"
                     } else {
                         "模型"
                     }),
@@ -304,6 +298,24 @@ impl Speaky {
         if !picker.expanded {
             return Some(panel);
         }
+        panel = panel.child(
+            super::button("打开模型包目录", false)
+                .id("open-model-packs")
+                .on_click(cx.listener(|view, _, _, cx| {
+                    let directory = model_packs::prepare_directory().and_then(|path| {
+                        reqwest::Url::from_directory_path(path)
+                            .map_err(|_| "无法打开模型包目录。".to_owned())
+                    });
+                    match directory {
+                        Ok(url) => {
+                            cx.open_url(url.as_str());
+                            view.model_picker.error = None;
+                        }
+                        Err(error) => view.model_picker.error = Some(error),
+                    }
+                    cx.notify();
+                })),
+        );
         if picker.listing {
             return Some(
                 panel.child(
@@ -322,7 +334,7 @@ impl Speaky {
                         .px_2()
                         .py_1()
                         .text_color(rgb(MUTED))
-                        .child("未找到本地语音识别模型。"),
+                        .child("未找到适用于此系统的模型包。请将解压后的模型包放入 packs 目录。"),
                 ),
             );
         }
@@ -335,14 +347,15 @@ impl Speaky {
                     .children(picker.models.iter().enumerate().map(|(index, model)| {
                         let selected = picker.selected.as_deref() == Some(model.id.as_str());
                         let model = model.clone();
+                        #[cfg(windows)]
+                        let motion = self.tour.model_row_motion(index);
+                        #[cfg(not(windows))]
+                        let motion: Option<(f32, gpui::Pixels)> = None;
                         div()
                             .id(("home-model-option", index))
-                            .when_some(
-                                self.tour.model_row_motion(index),
-                                |row, (opacity, offset)| {
-                                    row.relative().top(offset).opacity(opacity)
-                                },
-                            )
+                            .when_some(motion, |row, (opacity, offset)| {
+                                row.relative().top(offset).opacity(opacity)
+                            })
                             .h(px(34.))
                             .px_2()
                             .flex()

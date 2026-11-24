@@ -4,10 +4,10 @@ mod remote;
 mod volcengine;
 
 pub(crate) use detect::{check_service, detect_service};
-pub(crate) use openai::loopback;
 pub use openai::OpenAIEngine;
+pub(crate) use openai::RUNTIME;
 pub(crate) use remote::{Protocol, RemoteEngine};
-pub use volcengine::{VolcBigModelEngine, VolcRealtimeSession};
+pub use volcengine::VolcBigModelEngine;
 
 use crate::config::Config;
 use log::{info, warn};
@@ -63,6 +63,17 @@ impl std::fmt::Display for EngineError {
 }
 
 impl std::error::Error for EngineError {}
+
+fn http_status_error(status: u16) -> EngineError {
+    let detail = match status {
+        401 | 403 => "请检查 API 密钥和访问权限。",
+        404 => "请检查转写路径和模型 ID。",
+        400 | 422 => "请检查模型 ID 和音频格式。",
+        429 => return EngineError::RateLimited("HTTP 429，服务请求过多或额度不足。".into()),
+        _ => "请检查服务状态。",
+    };
+    EngineError::NetworkError(format!("HTTP {status}，{detail}"))
+}
 
 /// Trait for ASR (Automatic Speech Recognition) engines
 ///
@@ -135,35 +146,15 @@ pub trait Engine: Send + Sync {
 }
 
 pub(crate) fn uses_local_asr(config: &Config) -> bool {
-    #[cfg(windows)]
-    if crate::local_models::selected_id(config).is_some() {
-        return true;
-    }
     config.engine.current == "local"
-}
-
-#[cfg(all(test, windows))]
-#[test]
-fn routes_the_bundled_legacy_qwen_endpoint_through_the_gpu_manager() {
-    let mut config = Config::default();
-    config.engine.current = "openai".into();
-    config.engine.openai.model = "Qwen3-ASR-0.6B".into();
-    config.engine.openai.base_url = "http://127.0.0.1:18107/v1/".into();
-    assert!(uses_local_asr(&config));
-    config.engine.openai.base_url = "http://127.0.0.1:8201/v1".into();
-    assert!(!uses_local_asr(&config));
 }
 
 pub fn recognition_engine(config: &Config) -> Result<Box<dyn Engine + Send + Sync>, String> {
     if config.engine.current == "remote" {
         return Ok(Box::new(configured_remote(config)?));
     }
-    if let Some(framework) = crate::config::Framework::selected(config) {
-        return Ok(Box::new(OpenAIEngine::from_framework(framework, config)?));
-    }
-    #[cfg(windows)]
     if uses_local_asr(config) {
-        return Ok(Box::new(crate::local_models::ready_engine(config)?));
+        return Ok(Box::new(crate::model_packs::ready_engine(config)?));
     }
     create_engine(config).ok_or_else(|| "请先配置语音识别服务。".to_owned())
 }
