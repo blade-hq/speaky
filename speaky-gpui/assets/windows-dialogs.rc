@@ -1,0 +1,31 @@
+#include <windows.h>
+
+1 ICON "assets/speaky.ico"
+
+// Editable fields start at 100. Control 90 contains the localized instructions.
+101 DIALOGEX 0, 0, 292, 143
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Speaky"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Service URL", 91, 8, 11, 54, 12
+    EDITTEXT        100, 66, 8, 218, 16, ES_AUTOHSCROLL
+    LTEXT           "Model ID", 92, 8, 35, 54, 12
+    EDITTEXT        101, 66, 32, 218, 16, ES_AUTOHSCROLL
+    LTEXT           "API Key", 93, 8, 59, 54, 12
+    EDITTEXT        102, 66, 56, 218, 16, ES_AUTOHSCROLL | ES_PASSWORD
+    LTEXT           "", 90, 8, 82, 276, 28
+    DEFPUSHBUTTON   "Save", IDOK, 177, 119, 50, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 234, 119, 50, 16
+END
+
+102 DIALOGEX 0, 0, 308, 210
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Speaky"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "", 90, 8, 8, 292, 24
+    EDITTEXT        100, 8, 36, 292, 144, ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL
+    DEFPUSHBUTTON   "Save", IDOK, 193, 186, 50, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 250, 186, 50, 16
+END

@@ -1,3 +1,5 @@
+mod meter;
 mod recorder;
 
-pub use recorder::AudioRecorder;
+pub use meter::VoiceActivity;
+pub use recorder::{AudioRecorder, PreviewAudio};

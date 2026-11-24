@@ -1,37 +1,11 @@
 use std::{cell::Cell, rc::Rc};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Shortcut {
-    #[default]
-    OptionShiftSpace,
-    ControlShiftSpace,
-    ControlShiftD,
-}
+#[cfg(target_os = "macos")]
+mod mac_layout;
+mod shortcut;
 
-impl Shortcut {
-    pub const ALL: [Self; 3] = [
-        Self::OptionShiftSpace,
-        Self::ControlShiftSpace,
-        Self::ControlShiftD,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::OptionShiftSpace => "⌥⇧Space",
-            Self::ControlShiftSpace => "⌃⇧Space",
-            Self::ControlShiftD => "⌃⇧D",
-        }
-    }
-
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::OptionShiftSpace => "option_shift_space",
-            Self::ControlShiftSpace => "control_shift_space",
-            Self::ControlShiftD => "control_shift_d",
-        }
-    }
-}
+pub use shortcut::Shortcut;
 
 pub struct HotkeyEvents {
     events: UnboundedReceiver<u32>,
@@ -52,13 +26,22 @@ impl HotkeyEvents {
 #[cfg(target_os = "macos")]
 pub use macos::GlobalHotkey;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::GlobalHotkey;
+#[cfg(windows)]
+mod windows_capture;
+#[cfg(windows)]
+pub(crate) use windows_capture::{CaptureEvent, WindowCapture};
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub struct GlobalHotkey;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 impl GlobalHotkey {
     pub fn register(_: Shortcut) -> Result<(Self, HotkeyEvents), String> {
-        Err("全局快捷键目前仅支持 macOS。".into())
+        Err("全局快捷键目前支持 macOS 和 Windows。".into())
     }
 
     pub fn change(
@@ -66,8 +49,44 @@ impl GlobalHotkey {
         _: Shortcut,
         _: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        Err("全局快捷键目前仅支持 macOS。".into())
+        Err("全局快捷键目前支持 macOS 和 Windows。".into())
     }
+
+    pub fn suspend(&mut self) {}
+    pub fn resume(&mut self, _: Shortcut) -> Result<(), String> {
+        Err("全局快捷键目前支持 macOS 和 Windows。".into())
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct PressGate(Option<u32>);
+
+#[cfg(any(target_os = "macos", test))]
+impl PressGate {
+    fn update(&mut self, id: u32, pressed: bool) -> bool {
+        if pressed {
+            self.0.replace(id) != Some(id)
+        } else {
+            if self.0 == Some(id) {
+                self.0 = None;
+            }
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn mac_press_gate_rearms_only_after_the_same_key_is_released() {
+    let mut gate = PressGate::default();
+    assert!(gate.update(1, true));
+    assert!(!gate.update(1, true));
+    assert!(gate.update(2, true)); // New registration, previous key may still be held.
+    assert!(!gate.update(1, false));
+    assert!(!gate.update(2, true));
+    assert!(!gate.update(2, false));
+    assert!(gate.update(2, true));
 }
 
 #[cfg(target_os = "macos")]
@@ -78,12 +97,13 @@ mod macos {
     use std::rc::Rc;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-    use super::{HotkeyEvents, Shortcut};
+    use super::shortcut::{Key, NAMED};
+    use super::{HotkeyEvents, PressGate, Shortcut};
 
     const KEYBOARD_EVENT: u32 = u32::from_be_bytes(*b"keyb");
+    const HOTKEY_PRESSED: u32 = 5;
     const HOTKEY_RELEASED: u32 = 6;
-    const SPACE: u32 = 0x31;
-    const ANSI_D: u32 = 0x02;
+    const COMMAND: u32 = 1 << 8;
     const SHIFT: u32 = 1 << 9;
     const OPTION: u32 = 1 << 11;
     const CONTROL: u32 = 1 << 12;
@@ -100,6 +120,7 @@ mod macos {
     struct EventListener {
         sender: UnboundedSender<u32>,
         active_id: Rc<Cell<Option<u32>>>,
+        press_gate: PressGate,
     }
 
     #[repr(C)]
@@ -120,6 +141,7 @@ mod macos {
     #[link(name = "Carbon", kind = "framework")]
     extern "C" {
         fn GetApplicationEventTarget() -> CarbonRef;
+        fn GetEventKind(event: CarbonRef) -> u32;
         fn InstallEventHandler(
             target: CarbonRef,
             handler: extern "C" fn(CarbonRef, CarbonRef, *mut c_void) -> i32,
@@ -156,13 +178,47 @@ mod macos {
         registration: CarbonRef,
     }
 
+    fn key_and_modifiers(shortcut: Shortcut) -> Result<(u32, u32), String> {
+        use super::shortcut;
+        let mut flags = 0;
+        for (bit, flag) in [
+            (shortcut::CTRL, CONTROL),
+            (shortcut::ALT, OPTION),
+            (shortcut::SHIFT, SHIFT),
+            (shortcut::PLATFORM, COMMAND),
+        ] {
+            if shortcut.modifiers & bit != 0 {
+                flags |= flag;
+            }
+        }
+        let key = match shortcut.key {
+            Key::Named(name) => u32::from(NAMED.iter().find(|entry| entry.0 == name).unwrap().3),
+            Key::Function(n) => {
+                // Carbon kVK_F1 through kVK_F20, in function-key order.
+                const FUNCTION_KEYS: [u8; 20] = [
+                    122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64,
+                    79, 80, 90,
+                ];
+                u32::from(
+                    *FUNCTION_KEYS
+                        .get(usize::from(n - 1))
+                        .ok_or_else(|| format!("macOS 不支持注册 F{n}。"))?,
+                )
+            }
+            Key::Character(c) => {
+                let (key, _, shifted) = super::mac_layout::character_key(c, flags & COMMAND != 0)?;
+                if shifted {
+                    flags |= SHIFT;
+                }
+                u32::from(key)
+            }
+        };
+        Ok((key, flags))
+    }
+
     impl RegisteredKey {
         fn register(shortcut: Shortcut, target: CarbonRef) -> Result<Self, String> {
-            let (key, modifiers) = match shortcut {
-                Shortcut::OptionShiftSpace => (SPACE, OPTION | SHIFT),
-                Shortcut::ControlShiftSpace => (SPACE, CONTROL | SHIFT),
-                Shortcut::ControlShiftD => (ANSI_D, CONTROL | SHIFT),
-            };
+            let (key, modifiers) = key_and_modifiers(shortcut)?;
             let id = NEXT_ID.with(|next| {
                 let id = next.get();
                 let following = id
@@ -205,7 +261,7 @@ mod macos {
     }
 
     pub struct GlobalHotkey {
-        key: RegisteredKey,
+        key: Option<RegisteredKey>,
         handler: CarbonRef,
         active_id: Rc<Cell<Option<u32>>>,
     }
@@ -220,13 +276,20 @@ mod macos {
             }
             let target = unsafe { GetApplicationEventTarget() };
             let key = RegisteredKey::register(shortcut, target)?;
-            let event = EventType {
+            let kinds = [HOTKEY_PRESSED, HOTKEY_RELEASED].map(|kind| EventType {
                 class: KEYBOARD_EVENT,
-                kind: HOTKEY_RELEASED,
-            };
+                kind,
+            });
             let mut handler = null_mut();
             let status = unsafe {
-                InstallEventHandler(target, on_release, 1, &event, null_mut(), &mut handler)
+                InstallEventHandler(
+                    target,
+                    on_key,
+                    kinds.len(),
+                    kinds.as_ptr(),
+                    null_mut(),
+                    &mut handler,
+                )
             };
             if status != 0 {
                 return Err(format!("安装全局快捷键监听失败（macOS 状态码 {status}）。"));
@@ -238,11 +301,12 @@ mod macos {
                 *events.borrow_mut() = Some(EventListener {
                     sender,
                     active_id: active_id.clone(),
+                    press_gate: PressGate::default(),
                 });
             });
             Ok((
                 Self {
-                    key,
+                    key: Some(key),
                     handler,
                     active_id: active_id.clone(),
                 },
@@ -258,15 +322,28 @@ mod macos {
             shortcut: Shortcut,
             persist: impl FnOnce() -> Result<(), String>,
         ) -> Result<(), String> {
-            if shortcut == self.key.shortcut {
+            if self
+                .key
+                .as_ref()
+                .is_some_and(|key| key.shortcut == shortcut)
+            {
                 return persist();
             }
             let target = unsafe { GetApplicationEventTarget() };
             let key = RegisteredKey::register(shortcut, target)?;
             persist()?;
             self.active_id.set(Some(key.id));
-            self.key = key;
+            self.key = Some(key);
             Ok(())
+        }
+
+        pub fn suspend(&mut self) {
+            self.active_id.set(None);
+            self.key.take();
+        }
+
+        pub fn resume(&mut self, shortcut: Shortcut) -> Result<(), String> {
+            self.change(shortcut, || Ok(()))
         }
     }
 
@@ -278,7 +355,7 @@ mod macos {
         }
     }
 
-    extern "C" fn on_release(_: CarbonRef, event: CarbonRef, _: *mut c_void) -> i32 {
+    extern "C" fn on_key(_: CarbonRef, event: CarbonRef, _: *mut c_void) -> i32 {
         let mut id = EventHotkeyId {
             signature: 0,
             id: 0,
@@ -299,14 +376,17 @@ mod macos {
         }
         EVENTS
             .try_with(|events| {
-                let events = events.borrow();
-                let Some(listener) = events.as_ref() else {
+                let mut events = events.borrow_mut();
+                let Some(listener) = events.as_mut() else {
                     return EVENT_NOT_HANDLED;
                 };
                 if listener.active_id.get() != Some(id.id) {
                     return EVENT_NOT_HANDLED;
                 }
-                let _ = listener.sender.send(id.id);
+                let pressed = unsafe { GetEventKind(event) } == HOTKEY_PRESSED;
+                if listener.press_gate.update(id.id, pressed) {
+                    let _ = listener.sender.send(id.id);
+                }
                 0
             })
             .unwrap_or(EVENT_NOT_HANDLED)

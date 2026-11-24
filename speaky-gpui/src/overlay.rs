@@ -1,29 +1,52 @@
+use crate::audio::VoiceActivity;
+#[cfg(windows)]
+use crate::windows_floating::{self, Position, WindowDrag};
 use gpui::{
-    div, point, prelude::*, px, rgb, rgba, size, App, Bounds, Context, Window,
+    div, point, prelude::*, px, rgb, rgba, size, App, Bounds, Context, Pixels, Size, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use std::{rc::Rc, time::Instant};
 
-const WAVEFORM_BARS: usize = 20;
+mod wave;
+use wave::VoiceWave;
+
 const ACCENT: u32 = 0x9eaaff;
 const CORNER_RADIUS: f32 = 20.;
+#[cfg(windows)]
+const POSITION_FILE: &str = "caption-position.json";
 
 pub(super) struct RecordingOverlay {
     started_at: Instant,
-    levels: [f32; WAVEFORM_BARS],
+    elapsed_seconds: u64,
+    panel_size: Size<Pixels>,
+    wave: VoiceWave,
+    show_controls: bool,
+    show_caption: bool,
+    caption: String,
     on_finish: Rc<dyn Fn(&mut App)>,
+    #[cfg(windows)]
+    drag: Rc<WindowDrag>,
 }
 
 impl RecordingOverlay {
     pub(super) fn open(
         cx: &mut App,
+        show_controls: bool,
+        show_caption: bool,
         on_finish: impl Fn(&mut App) + 'static,
     ) -> Result<WindowHandle<Self>, String> {
         let display = cx
             .primary_display()
             .ok_or_else(|| "未找到可显示录音悬浮窗的屏幕。".to_owned())?;
         let screen = display.bounds();
-        let panel = size(px(224.), px(48.));
+        let panel = if show_caption {
+            size(
+                px(476.).min(screen.size.width),
+                px(if show_controls { 94. } else { 86. }),
+            )
+        } else {
+            size(px(224.).min(screen.size.width), px(48.))
+        };
         let bounds = Bounds::new(
             point(
                 (screen.size.width - panel.width) / 2.,
@@ -31,14 +54,16 @@ impl RecordingOverlay {
             ),
             panel,
         );
-        let mut native_result = Ok(());
+        #[cfg(windows)]
+        let drag = Rc::new(WindowDrag::new(POSITION_FILE));
+        let mut native_result: Result<(), String> = Ok(());
         let handle = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: None,
                     focus: false,
-                    show: cfg!(not(target_os = "macos")),
+                    show: cfg!(not(any(target_os = "macos", windows))),
                     kind: WindowKind::PopUp,
                     is_movable: false,
                     is_resizable: false,
@@ -48,15 +73,34 @@ impl RecordingOverlay {
                     ..Default::default()
                 },
                 |window, cx| {
-                    window.set_window_title("Speaky · 录音");
-                    #[cfg(target_os = "macos")]
+                    window.set_window_title(if show_controls {
+                        "Speaky · 录音"
+                    } else {
+                        "Speaky · 实时字幕"
+                    });
+                    #[cfg(windows)]
                     {
-                        native_result = show_panel(window);
+                        native_result = show_panel(window, &bounds, &drag);
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        native_result = show_panel(window, &bounds, show_controls);
                     }
                     cx.new(|_| Self {
                         started_at: Instant::now(),
-                        levels: [0.; WAVEFORM_BARS],
+                        elapsed_seconds: 0,
+                        panel_size: panel,
+                        wave: VoiceWave::default(),
+                        show_controls,
+                        show_caption,
+                        caption: if show_caption {
+                            "正在聆听…".into()
+                        } else {
+                            String::new()
+                        },
                         on_finish: Rc::new(on_finish),
+                        #[cfg(windows)]
+                        drag,
                     })
                 },
             )
@@ -68,10 +112,33 @@ impl RecordingOverlay {
         Ok(handle)
     }
 
-    pub(super) fn push_level(&mut self, level: f32, cx: &mut Context<Self>) {
-        self.levels.rotate_left(1);
-        self.levels[WAVEFORM_BARS - 1] = level.clamp(0., 1.);
-        cx.notify();
+    pub(super) fn push_activity(
+        &mut self,
+        activity: VoiceActivity,
+        caption: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        // Only the last two lines are visible. Keep the work per update independent
+        // of the total length of the recording, including for multibyte text.
+        let tail = caption_tail(caption.unwrap_or_default());
+        let caption_changed = self.caption != tail;
+        if caption_changed {
+            self.caption.clear();
+            self.caption.push_str(tail);
+        }
+        let seconds = self.started_at.elapsed().as_secs();
+        let timer_changed = self.show_controls && seconds != self.elapsed_seconds;
+        self.elapsed_seconds = seconds;
+        if self.wave.update(activity) || caption_changed || timer_changed {
+            cx.notify();
+        }
+    }
+}
+
+fn caption_tail(text: &str) -> &str {
+    match text.char_indices().rev().nth(191) {
+        Some((index, _)) => &text[index..],
+        None => text,
     }
 }
 
@@ -94,19 +161,17 @@ impl Render for StopTooltip {
 
 impl Render for RecordingOverlay {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let seconds = self.started_at.elapsed().as_secs();
+        let seconds = self.elapsed_seconds;
         let timer = format!("{:02}:{:02}", seconds / 60, seconds % 60);
         let on_finish = self.on_finish.clone();
-        div()
-            .size_full()
+        #[cfg(windows)]
+        let drag = self.drag.clone();
+        let controls = div()
+            .w_full()
+            .h(px(30.))
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
-            .rounded(px(CORNER_RADIUS))
-            .border_1()
-            .border_color(rgba(0xa6b7ff3c))
-            .bg(rgba(0x181c28b8))
             .child(
                 div()
                     .flex()
@@ -115,19 +180,7 @@ impl Render for RecordingOverlay {
                     .child(div().size(px(6.)).rounded_full().bg(rgb(ACCENT)))
                     .child(div().text_xs().text_color(rgb(0xc4cce3)).child(timer)),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(2.))
-                    .children(self.levels.iter().map(|level| {
-                        let height = 3. + 21. * (level * 5.).sqrt().min(1.);
-                        div().w(px(2.)).h(px(height)).rounded_full().bg(rgb(ACCENT))
-                    })),
-            )
+            .child(div().flex_1().min_w(px(0.)).child(self.wave.element()))
             .child(
                 div()
                     .id("overlay-finish")
@@ -143,16 +196,118 @@ impl Render for RecordingOverlay {
                     .child(div().size(px(10.)).rounded(px(1.5)).bg(rgb(0xeff2ff)))
                     .tooltip(|_, cx| cx.new(|_| StopTooltip).into())
                     .on_click(move |_, _, cx| {
+                        #[cfg(windows)]
+                        if drag.did_drag() {
+                            return;
+                        }
                         let on_finish = on_finish.clone();
                         cx.defer(move |cx| on_finish(cx));
                     }),
-            )
+            );
+        // A nonactivating HWND can retain GPUI's larger initial viewport. Lay
+        // out against the same logical bounds as the native caption window.
+        div()
+            .w(self.panel_size.width)
+            .h(self.panel_size.height)
+            .px_3()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap_1()
+            .overflow_hidden()
+            .rounded(px(CORNER_RADIUS))
+            .border_1()
+            .border_color(rgba(0xa6b7ff3c))
+            .bg(rgba(0x181c28f0))
+            .when(cfg!(windows), |panel| panel.cursor_grab())
+            .when(self.show_caption, |panel| {
+                panel.child(
+                    div()
+                        .w_full()
+                        .h(px(42.))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .w_full()
+                                .flex_none()
+                                .text_size(px(15.))
+                                .line_height(px(21.))
+                                .text_color(rgb(0xeff2ff))
+                                .child(self.caption.clone()),
+                        ),
+                )
+            })
+            .when(self.show_caption && !self.show_controls, |panel| {
+                panel.child(self.wave.element())
+            })
+            .when(self.show_controls, |panel| panel.child(controls))
     }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn show_panel(_: &Window, _: &Bounds<Pixels>, _: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn show_panel(
+    window: &Window,
+    bounds: &Bounds<Pixels>,
+    drag: &Rc<WindowDrag>,
+) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{
+            MonitorFromPoint, MonitorFromWindow, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
+        },
+        UI::{
+            HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+            WindowsAndMessaging::GetForegroundWindow,
+        },
+    };
+
+    let saved = windows_floating::saved_position(POSITION_FILE).and_then(|position| {
+        let point = POINT {
+            x: position.x,
+            y: position.y,
+        };
+        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) };
+        (!monitor.0.is_null()).then_some((position, monitor))
+    });
+    let monitor = saved.map(|(_, monitor)| monitor).unwrap_or_else(|| unsafe {
+        MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY)
+    });
+    let work =
+        windows_floating::monitor_work_area(monitor).ok_or("无法取得字幕悬浮窗的工作区。")?;
+    let (mut dpi_x, mut dpi_y) = (0, 0);
+    let scale = if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
+        .is_ok()
+        && dpi_x != 0
+    {
+        dpi_x as f32 / 96.
+    } else {
+        window.scale_factor()
+    };
+    let device_px = |length: Pixels| (f32::from(length) * scale).round() as i32;
+    let width = device_px(bounds.size.width).min(work.right - work.left);
+    let height = device_px(bounds.size.height).min(work.bottom - work.top);
+    let position = saved
+        .map(|(position, _)| position)
+        .unwrap_or(Position {
+            x: work.left + (work.right - work.left - width) / 2,
+            y: work.bottom - height - device_px(px(56.)),
+        })
+        .clamp_to(work, width, height);
+    windows_floating::show(window, drag, position, width, height)
 }
 
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
-fn show_panel(window: &Window) -> Result<(), String> {
+fn show_panel(window: &Window, _: &Bounds<Pixels>, controls: bool) -> Result<(), String> {
     use objc::{
         class, msg_send,
         runtime::{Object, NO, YES},
@@ -209,6 +364,9 @@ fn show_panel(window: &Window) -> Result<(), String> {
         let _: () = msg_send![panel, setHasShadow: YES];
         let _: () = msg_send![panel, setHidesOnDeactivate: NO];
         let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: YES];
+        let ignore_mouse = if controls { NO } else { YES };
+        let _: () = msg_send![panel, setIgnoresMouseEvents: ignore_mouse];
+        let _: () = msg_send![panel, setLevel: 3isize]; // NSFloatingWindowLevel
         let _: () = msg_send![panel, orderFrontRegardless];
     }
     Ok(())
