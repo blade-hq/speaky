@@ -8,7 +8,7 @@ use gpui::{
 use std::{rc::Rc, time::Instant};
 
 mod wave;
-use wave::VoiceWave;
+use speaky_core::wave::VoiceWave;
 
 const ACCENT: u32 = 0x9eaaff;
 const CORNER_RADIUS: f32 = 20.;
@@ -180,7 +180,7 @@ impl Render for RecordingOverlay {
                     .child(div().size(px(6.)).rounded_full().bg(rgb(ACCENT)))
                     .child(div().text_xs().text_color(rgb(0xc4cce3)).child(timer)),
             )
-            .child(div().flex_1().min_w(px(0.)).child(self.wave.element()))
+            .child(div().flex_1().min_w(px(0.)).child(wave::element(self.wave)))
             .child(
                 div()
                     .id("overlay-finish")
@@ -242,7 +242,7 @@ impl Render for RecordingOverlay {
                 )
             })
             .when(self.show_caption && !self.show_controls, |panel| {
-                panel.child(self.wave.element())
+                panel.child(wave::element(self.wave))
             })
             .when(self.show_controls, |panel| panel.child(controls))
     }

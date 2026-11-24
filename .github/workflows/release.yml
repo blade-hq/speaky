@@ -28,8 +28,8 @@ jobs:
       - if: runner.os == 'macOS'
         name: Package macOS
         run: |
-          cargo build --release --locked --manifest-path speaky-gpui/Cargo.toml
-          ditto -c -k --norsrc speaky-gpui/target/release/speaky-gpui Speaky-macOS.zip
+          cargo build --release --locked -p speaky-gpui
+          ditto -c -k --norsrc target/release/speaky-gpui Speaky-macOS.zip
       - if: runner.os == 'Windows'
         name: Package Windows x64
         shell: pwsh
@@ -38,17 +38,36 @@ jobs:
               Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
           if (!$fxc) { throw 'Windows SDK fxc.exe is required for the release build.' }
           $env:GPUI_FXC_PATH = $fxc.FullName
-          cargo build --release --locked --manifest-path speaky-gpui/Cargo.toml
+          cargo build --release --locked -p speaky-gpui
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/package-windows.ps1 -Executable speaky-gpui/target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip
+          ./scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Speaky-${{ runner.os }}
           path: Speaky-*.zip
           if-no-files-found: error
 
+  win7:
+    name: Win7 (windows-2022)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Build and validate Windows 7 executable
+        shell: pwsh
+        run: ./scripts/build-win7.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Speaky-Windows7-x64
+          path: Speaky-Windows7-x64.zip
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, win7]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -63,4 +82,5 @@ jobs:
           files: |
             Speaky-macOS.zip
             Speaky-Windows-x64.zip
+            Speaky-Windows7-x64.zip
           fail_on_unmatched_files: true

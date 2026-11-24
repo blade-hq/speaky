@@ -1,6 +1,6 @@
 use crate::{
     button,
-    config::{Config, LlmOpenAIConfig},
+    config::Config,
     drafts, polish, polish_benchmark, polish_preferences,
     settings::detail,
     Speaky,
@@ -268,16 +268,6 @@ impl Speaky {
                         .child(case.output.clone())
                         .children(case.issues.iter().cloned().map(detail))
                 })),
-        }
-    }
-}
-
-impl drafts::Organized {
-    fn model_settings(&self) -> LlmOpenAIConfig {
-        LlmOpenAIConfig {
-            base_url: self.base_url.clone(),
-            model: self.model.clone(),
-            api_key: String::new(),
         }
     }
 }
