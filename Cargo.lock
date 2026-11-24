@@ -5335,7 +5335,6 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "cpal",
- "dirs 5.0.1",
  "flate2",
  "futures-util",
  "log",

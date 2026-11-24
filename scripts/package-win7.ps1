@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Executable = 'target/x86_64-win7-windows-msvc/release/speaky-win7.exe',
     [string]$Output = 'Speaky-Windows7-x64.zip'
 )
@@ -98,7 +98,7 @@ if ($dumpbin) {
 }
 if (!($imports -match '\.dll$')) { throw 'Could not read a PE import library.' }
 
-$blockedDll = '^(?:shcore|dcomp|bcryptprimitives|ucrtbase|vcruntime\w*|msvcp\d\w*|msvcr\d\w*)\.dll$|^(?:api-ms-win-shcore-|api-ms-win-crt-|ext-ms-)|^api-ms-win-core-synch-l1-2-0\.dll$'
+$blockedDll = '^(?:shcore|dcomp|combase|bcryptprimitives|ucrtbase|vcruntime\w*|msvcp\d\w*|msvcr\d\w*)\.dll$|^(?:api-ms-win-shcore-|api-ms-win-crt-|ext-ms-)|^api-ms-win-core-synch-l1-2-0\.dll$'
 $blockedFunction = '^(?:GetDpiForMonitor|GetDpiForWindow|GetSystemDpiForProcess|GetDpiForSystem|AdjustWindowRectExForDpi|EnableNonClientDpiScaling|SetProcessDpiAwareness|SetProcessDpiAwarenessContext|SetThreadDpiAwarenessContext|ProcessPrng|WaitOnAddress|WakeByAddressSingle|WakeByAddressAll|GetSystemTimePreciseAsFileTime|CreateFile2|SetThreadDescription|GetThreadDescription|GetCurrentThreadStackLimits|GetSystemCpuSetInformation|GetOverlappedResultEx|GetTempPath2[AW]|GetPackageFullName|GetCurrentPackageId|RoInitialize|RoGetActivationFactory)$'
 $blocked = $imports | Where-Object { $_ -match $blockedDll -or $_ -match $blockedFunction } | Sort-Object -Unique
 if ($blocked) { throw "Unsupported Win7 or dynamic CRT imports: $($blocked -join ', ')." }

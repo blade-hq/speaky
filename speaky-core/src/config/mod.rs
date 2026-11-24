@@ -392,7 +392,7 @@ impl Config {
         if let Some(directory) = std::env::var_os("SPEAKY_CONFIG_DIR").filter(|p| !p.is_empty()) {
             return PathBuf::from(directory);
         }
-        let directory = dirs::config_dir()
+        let directory = user_config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("speaky");
         // The legacy Windows client uses the same case-insensitive directory
@@ -439,5 +439,44 @@ impl Config {
             .map_err(ConfigError::write_error)?;
         info!("Config saved successfully");
         Ok(())
+    }
+}
+
+fn user_config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::{
+            FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+        };
+        if let Ok(raw) =
+            unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }
+        {
+            let path = PathBuf::from(OsString::from_wide(unsafe { raw.as_wide() }));
+            unsafe { CoTaskMemFree(Some(raw.0.cast())) };
+            return Some(path);
+        }
+        std::env::var_os("APPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join("Library/Application Support"))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|home| PathBuf::from(home).join(".config"))
+            })
     }
 }
