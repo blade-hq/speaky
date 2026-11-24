@@ -13,7 +13,7 @@ try {
     Expand-Archive -LiteralPath $zip -DestinationPath $temp
     $thunks = (Get-Item -LiteralPath (Join-Path $temp 'objs/x64/YY_Thunks_for_Win7.obj')).FullName
     $env:CARGO_ENCODED_RUSTFLAGS = @('-C', 'target-feature=+crt-static', '-C', "link-arg=$thunks", '-C', 'link-arg=/SUBSYSTEM:WINDOWS,6.01') -join [char]31
-    cargo +nightly build --release -p speaky-win7 --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --locked
+    cargo +nightly build --release -p speaky-win7 --target x86_64-win7-windows-msvc -Z build-std=std,panic_unwind --locked
     if ($LASTEXITCODE -ne 0) { throw "Win7 build failed ($LASTEXITCODE)." }
     ./scripts/package-win7.ps1
 } finally {
