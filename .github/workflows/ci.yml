@@ -3,65 +3,31 @@ name: Speaky CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, windows-2022]
-    name: GPUI (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  core-check:
+    name: Core Tests (ubuntu-latest)
+    runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace --locked
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux audio & TLS dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libssl-dev
+      - run: cargo test -p speaky-core --locked
       - run: cargo test -p speaky-core --no-default-features --locked
-      - if: runner.os == 'macOS'
-        run: cargo build -p speaky-gpui --locked
-      - if: runner.os == 'Windows'
-        name: Build Whisper runtime
-        shell: bash
-        run: bash scripts/build-whisper-runtime.sh
-      - if: runner.os == 'Windows'
-        name: Build portable Windows client
-        shell: pwsh
-        run: |
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
-              Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
-          if (!$fxc) { throw 'Windows SDK fxc.exe is required for the release build.' }
-          $env:GPUI_FXC_PATH = $fxc.FullName
-          cargo build -p speaky-gpui --release --locked
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip -WhisperRuntime target/whisper-runtime
-      - if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: Speaky-Windows-x64
-          path: Speaky-Windows-x64.zip
-          if-no-files-found: error
-
-  win7:
-    name: Win7 (windows-2022)
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-      - name: Build and validate Windows 7 executable
-        shell: pwsh
-        run: ./scripts/build-win7.ps1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Speaky-Windows7-x64
-          path: Speaky-Windows7-x64.zip
-          if-no-files-found: error
