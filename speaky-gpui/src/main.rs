@@ -123,6 +123,8 @@ struct Speaky {
     recording: Option<Recording>,
     global_hotkey: Option<hotkey::GlobalHotkey>,
     hotkey_status: String,
+    #[cfg(target_os = "macos")]
+    mac_dictation_access: bool,
     status: String,
     result: Option<(history::Target, String)>,
     correction: correction_ui::CorrectionEditor,
@@ -167,6 +169,8 @@ impl Speaky {
             recording: None,
             global_hotkey: hotkey,
             hotkey_status,
+            #[cfg(target_os = "macos")]
+            mac_dictation_access: mac_dictation::has_access(),
             status: String::new(),
             result: history::latest(&archive),
             correction: correction_ui::CorrectionEditor::default(),
@@ -758,12 +762,7 @@ impl Speaky {
                         let status = mac_target.map_or(status, |target| {
                             match target.and_then(|target| target.insert(&text, cx)) {
                                 Ok(notice) => notice.into(),
-                                Err(error) => {
-                                    if error == mac_dictation::ACCESSIBILITY {
-                                        mac_dictation::request_access();
-                                    }
-                                    format!("{error} 转写已保存，可在听写或历史中复制。")
-                                }
+                                Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
                             }
                         });
                         view.result = Some((history::Target::Draft(completed_draft), text));
@@ -1027,6 +1026,14 @@ impl Speaky {
         } else {
             ("麦克风待命", ACCENT)
         };
+        #[cfg(not(target_os = "macos"))]
+        let external_help = "点目标输入框，按快捷键开始，再按一次结束。";
+        #[cfg(target_os = "macos")]
+        let external_help = if self.mac_dictation_access {
+            "辅助功能已授权。点目标输入框，按快捷键开始，再按一次结束。"
+        } else {
+            "当前 Speaky 尚未获得辅助功能权限。"
+        };
         let controls = card()
             .p_4()
             .flex()
@@ -1066,30 +1073,34 @@ impl Speaky {
                     ),
             )
             .child(
-                home_command(
-                    "在其他应用中听写",
-                    "点目标输入框，按快捷键开始，再按一次结束。",
-                    MUTED,
-                )
-                .border_t_1()
-                .border_color(rgb(BORDER))
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when_some(
-                            self.hotkey_status.strip_prefix("全局快捷键 "),
-                            |row, shortcut| row.child(studio_ui::keycap(shortcut)),
-                        )
-                        .child(button("更改", false).id("home-edit-shortcut").on_click(
-                            cx.listener(|view, _, window, cx| {
-                                view.open_shortcut_settings(window, cx)
-                            }),
-                        )),
-                ),
+                home_command("在其他应用中听写", external_help, MUTED)
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(
+                                self.hotkey_status.strip_prefix("全局快捷键 "),
+                                |row, shortcut| row.child(studio_ui::keycap(shortcut)),
+                            )
+                            .child(button("更改", false).id("home-edit-shortcut").on_click(
+                                cx.listener(|view, _, window, cx| {
+                                    view.open_shortcut_settings(window, cx)
+                                }),
+                            )),
+                    ),
             );
+        #[cfg(target_os = "macos")]
+        let controls = controls.when(!self.mac_dictation_access, |controls| {
+            controls.child(
+                button("打开辅助功能设置", false)
+                    .id("open-mac-accessibility-settings")
+                    .on_click(|_, _, cx| cx.open_url(mac_dictation::ACCESSIBILITY_SETTINGS)),
+            )
+        });
         let controls = controls.child(
             div()
                 .relative()
@@ -1937,7 +1948,20 @@ fn main() {
                         let executor = cx.background_executor().clone();
                         cx.spawn(async move |entity, cx| loop {
                             executor.timer(Duration::from_secs(2)).await;
-                            if entity.update(cx, Speaky::checkpoint).is_err() {
+                            if entity
+                                .update(cx, |view, cx| {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let access = mac_dictation::has_access();
+                                        if view.mac_dictation_access != access {
+                                            view.mac_dictation_access = access;
+                                            cx.notify();
+                                        }
+                                    }
+                                    view.checkpoint(cx);
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
                         })
@@ -2054,6 +2078,8 @@ fn main() {
             ],
         }]);
         cx.activate(true);
+        #[cfg(target_os = "macos")]
+        cx.defer(|_| mac_dictation::request_access());
         #[cfg(windows)]
         let _ = window.update(cx, |view, _, cx| {
             cx.observe_self(|view, cx| view.sync_floating(cx)).detach();

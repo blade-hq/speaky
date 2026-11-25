@@ -15,14 +15,12 @@ use objc::{
 use std::{
     ffi::c_void,
     ptr,
-    sync::Once,
     time::{Duration, Instant},
 };
 
 const FOCUS_CHANGED: &str = "输入焦点已改变。";
 const NO_EDITOR: &str = "开始听写前，请先点一下可编辑的输入框。";
-pub(super) const ACCESSIBILITY: &str =
-    "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 Speaky 写入输入框。";
+const ACCESSIBILITY: &str = "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 Speaky 写入输入框。";
 const AX_VALUE_CF_RANGE: u32 = 4;
 const ANSI_V: u16 = 0x09;
 const PASTE_FAILED: &str = "无法向原输入框粘贴转写。";
@@ -55,14 +53,20 @@ extern "C" {
     ) -> i32;
 }
 
+pub(super) const ACCESSIBILITY_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+pub(super) fn has_access() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
 pub(super) fn request_access() {
-    static PROMPT: Once = Once::new();
-    if unsafe { AXIsProcessTrusted() } == 0 {
-        PROMPT.call_once(|| unsafe {
+    if !has_access() {
+        unsafe {
             let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
             let options = CFDictionary::from_CFType_pairs(&[(key, CFBoolean::true_value())]);
             AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef());
-        });
+        }
     }
 }
 
@@ -78,7 +82,7 @@ impl Target {
         if pid as u32 == std::process::id() {
             return Ok(None);
         }
-        if unsafe { AXIsProcessTrusted() } == 0 {
+        if !has_access() {
             return Err(ACCESSIBILITY.into());
         }
         let field = focused_field(pid).ok_or(NO_EDITOR)?;
