@@ -757,7 +757,7 @@ impl Speaky {
                         #[cfg(target_os = "macos")]
                         let status = mac_target.map_or(status, |target| {
                             match target.and_then(|target| target.insert(&text, cx)) {
-                                Ok(()) => "已输入到原来的输入框。".into(),
+                                Ok(notice) => notice.into(),
                                 Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
                             }
                         });

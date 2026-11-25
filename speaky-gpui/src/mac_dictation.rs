@@ -1,5 +1,5 @@
 use core_foundation::{
-    base::{Boolean, CFType, CFTypeID, CFTypeRef, TCFType},
+    base::{Boolean, CFRange, CFType, CFTypeID, CFTypeRef, TCFType},
     string::{CFString, CFStringRef},
 };
 use core_graphics::event::{CGEvent, CGEventFlags};
@@ -10,17 +10,24 @@ use objc::{
     runtime::{Object, BOOL, YES},
     sel, sel_impl,
 };
-use std::{ptr, time::Duration};
+use std::{
+    ffi::c_void,
+    ptr,
+    time::{Duration, Instant},
+};
 
 const FOCUS_CHANGED: &str = "输入焦点已改变。";
 const NO_EDITOR: &str = "开始听写前，请先点一下可编辑的输入框。";
 const ACCESSIBILITY: &str = "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 Speaky 写入输入框。";
+const AX_VALUE_CF_RANGE: u32 = 4;
 const ANSI_V: u16 = 0x09;
 const PASTE_FAILED: &str = "无法向原输入框粘贴转写。";
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> Boolean;
+    fn AXValueGetTypeID() -> CFTypeID;
+    fn AXValueGetValue(value: CFTypeRef, kind: u32, out: *mut c_void) -> Boolean;
     fn AXUIElementCreateSystemWide() -> CFTypeRef;
     fn AXUIElementGetTypeID() -> CFTypeID;
     fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
@@ -87,10 +94,10 @@ impl Target {
         &self,
         text: &str,
         cx: &mut gpui::Context<crate::Speaky>,
-    ) -> Result<(), String> {
+    ) -> Result<&'static str, String> {
         self.require_current()?;
         let selected_text = CFString::new("AXSelectedText");
-        let text = CFString::new(text);
+        let cf_text = CFString::new(text);
         let mut settable = 0;
         let status = unsafe {
             AXUIElementIsAttributeSettable(
@@ -107,36 +114,83 @@ impl Target {
                 AXUIElementSetAttributeValue(
                     self.field.as_CFTypeRef(),
                     selected_text.as_concrete_TypeRef(),
-                    text.as_CFTypeRef(),
+                    cf_text.as_CFTypeRef(),
                 )
             };
             return if status == 0 {
-                Ok(())
+                Ok("已输入到原来的输入框。")
             } else {
                 Err(PASTE_FAILED.into())
             };
         }
 
+        let expected = self.expected_value(text);
         let source = CGEventSource::new(CGEventSourceStateID::Private).map_err(|_| PASTE_FAILED)?;
         let down =
             CGEvent::new_keyboard_event(source.clone(), ANSI_V, true).map_err(|_| PASTE_FAILED)?;
         let up = CGEvent::new_keyboard_event(source, ANSI_V, false).map_err(|_| PASTE_FAILED)?;
         down.set_flags(CGEventFlags::CGEventFlagCommand);
         up.set_flags(CGEventFlags::CGEventFlagCommand);
-        let clipboard = Pasteboard::put(&text).ok_or(PASTE_FAILED)?;
+        let mut clipboard = Pasteboard::put(&cf_text).ok_or(PASTE_FAILED)?;
         self.require_current()?;
         if !clipboard.is_current() {
             return Err(PASTE_FAILED.into());
         }
+        // After posting the key, the target can read the pasteboard at any
+        // time. Restore the old contents only when the new value is visible.
+        clipboard.restore_on_drop = false;
         down.post_to_pid(self.pid);
         up.post_to_pid(self.pid);
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |_, _| {
-            executor.timer(Duration::from_millis(400)).await;
-            drop(clipboard);
-        })
-        .detach();
-        Ok(())
+        if let Some(expected) = expected {
+            let field = self.field.clone();
+            let executor = cx.background_executor().clone();
+            cx.spawn(async move |_, _| {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while clipboard.is_current() && Instant::now() < deadline {
+                    if attribute(&field, "AXValue")
+                        .and_then(|value| value.downcast::<CFString>())
+                        .is_some_and(|value| value.to_string() == expected)
+                    {
+                        clipboard.restore_on_drop = true;
+                        break;
+                    }
+                    executor.timer(Duration::from_millis(100)).await;
+                }
+            })
+            .detach();
+        }
+        Ok("已发送粘贴，请核对输入框。无法确认写入时，转写会留在剪贴板。")
+    }
+
+    fn expected_value(&self, transcript: &str) -> Option<String> {
+        let value = attribute(&self.field, "AXValue")?
+            .downcast::<CFString>()?
+            .to_string();
+        let selection = attribute(&self.field, "AXSelectedTextRange")?;
+        let mut range = CFRange {
+            location: 0,
+            length: 0,
+        };
+        unsafe {
+            if selection.type_of() != AXValueGetTypeID()
+                || AXValueGetValue(
+                    selection.as_CFTypeRef(),
+                    AX_VALUE_CF_RANGE,
+                    (&mut range as *mut CFRange).cast(),
+                ) == 0
+            {
+                return None;
+            }
+        }
+        let start = usize::try_from(range.location).ok()?;
+        let end = start.checked_add(usize::try_from(range.length).ok()?)?;
+        let mut units: Vec<_> = value.encode_utf16().collect();
+        if end > units.len() {
+            return None;
+        }
+        units.splice(start..end, transcript.encode_utf16());
+        let expected = String::from_utf16(&units).ok()?;
+        (expected != value).then_some(expected)
     }
 }
 
@@ -179,6 +233,7 @@ struct Pasteboard {
     board: StrongPtr,
     saved: StrongPtr,
     change: isize,
+    restore_on_drop: bool,
 }
 
 impl Pasteboard {
@@ -216,6 +271,7 @@ impl Pasteboard {
                 board: StrongPtr::retain(board),
                 saved: copies,
                 change,
+                restore_on_drop: true,
             };
             let kind = CFString::new("public.utf8-plain-text");
             let written: BOOL = msg_send![board, setString: text.as_concrete_TypeRef() as *mut Object forType: kind.as_concrete_TypeRef() as *mut Object];
@@ -232,7 +288,7 @@ impl Pasteboard {
 
 impl Drop for Pasteboard {
     fn drop(&mut self) {
-        if self.is_current() {
+        if self.restore_on_drop && self.is_current() {
             unsafe {
                 let _: isize = msg_send![*self.board, clearContents];
                 let _: BOOL = msg_send![*self.board, writeObjects: *self.saved];
