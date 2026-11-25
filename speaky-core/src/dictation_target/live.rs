@@ -359,6 +359,9 @@ impl Composition {
         deadline: Instant,
     ) -> Result<(), String> {
         if let Some(error) = self.interrupted.take() {
+            if error != UNCONFIRMED_WRITE {
+                return Err(error);
+            }
             let original = self.original.as_ref().ok_or_else(|| error.clone())?;
             let current = editor.snapshot()?;
             if !self.reconcile(&current, original.clone()) {

@@ -22,6 +22,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     STATE_SYSTEM_READONLY,
 };
 
+const UNCONFIRMED_WRITE: &str = "无法确认目标已写入，请核对输入框和转写。";
 const FOCUS_CHANGED: &str = "输入焦点已改变，本次转写已保留。";
 const UNSUPPORTED: &str = "此输入框无法安全地插入转写，请复制结果。";
 const NO_EDITOR: &str = "没有找到可写的输入框。请点一下聊天输入框，再启动听写。";
@@ -604,10 +605,14 @@ impl AutomationEditor {
         } else {
             send_inputs(&unicode_packets(text)?)?;
         }
-        let mut observed = false;
+        let mut result = Err(UNCONFIRMED_WRITE.into());
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
-            if self.require_focus(focus).is_err() || self.require_writable().is_err() {
+            if let Err(error) = self
+                .require_focus(focus)
+                .and_then(|()| self.require_writable())
+            {
+                result = Err(error);
                 break;
             }
             if confirm_composition.as_ref().map_or_else(
@@ -618,18 +623,22 @@ impl AutomationEditor {
                 },
                 |confirm| confirm(),
             ) {
-                observed = true;
+                result = Ok(());
                 break;
             }
         }
         if let Some(clipboard) = clipboard {
-            clipboard.restore()?;
+            let restored = clipboard.restore();
+            if result.is_ok()
+                || result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error: &String| error == UNCONFIRMED_WRITE)
+            {
+                restored?;
+            }
         }
-        if observed {
-            Ok(())
-        } else {
-            Err("无法确认目标已写入，请核对输入框和转写。".into())
-        }
+        result
     }
 }
 
