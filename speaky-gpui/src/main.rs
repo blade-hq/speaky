@@ -282,12 +282,11 @@ impl Speaky {
             return;
         }
         self.model_picker.close();
-        // Bind the destination at the user's shortcut or floating-button press.
-        // The UIA worker can resolve the editor while the microphone opens.
+        // Capture the editor for live previews while the microphone opens.
         #[cfg(windows)]
         let destination = if source == RecordingStart::Desktop {
             match dictation_target::DictationTarget::capture_foreground() {
-                dictation_target::Foreground::Speaky => RecordingDestination::Archive,
+                dictation_target::Foreground::Speaky => RecordingDestination::External(None),
                 dictation_target::Foreground::External(target) => {
                     RecordingDestination::External(target)
                 }
@@ -483,9 +482,9 @@ impl Speaky {
         {
             let issue = match &recording.destination {
                 RecordingDestination::Archive => None,
-                RecordingDestination::External(None) => Some(
-                    "开始听写时未找到输入框。请停止录音，点一下聊天输入框，再用快捷键或悬浮按钮开始听写。".into(),
-                ),
+                RecordingDestination::External(None) => {
+                    Some("开始时未找到输入框。结束后会尝试写入当前输入框。".into())
+                }
                 RecordingDestination::External(Some(target)) => target.delivery_issue(),
             };
             if recording.delivery_issue != issue {
@@ -698,13 +697,15 @@ impl Speaky {
                 let status = match destination {
                     RecordingDestination::Archive => String::new(),
                     #[cfg(windows)]
-                    RecordingDestination::External(Some(target)) => match target.insert(&text) {
-                        Ok(()) => "已输入到原来的输入框。".into(),
-                        Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
-                    },
-                    #[cfg(windows)]
-                    RecordingDestination::External(None) => {
-                        "没有找到可输入的文本框。转写已保存，可在听写或历史中复制。".into()
+                    RecordingDestination::External(target) => {
+                        match dictation_target::DictationTarget::deliver_final(
+                            target.as_ref(),
+                            &text,
+                        ) {
+                            Ok(true) => "已输入到当前输入框。".into(),
+                            Ok(false) => String::new(),
+                            Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
+                        }
                     }
                 };
                 Ok((text, status))

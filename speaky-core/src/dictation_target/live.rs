@@ -56,10 +56,17 @@ impl Editor {
         Self { focus, automation }
     }
 
-    fn writable(&self) -> Result<(), String> {
-        self.focus.require_current()?;
+    pub(super) fn require_focus(&self) -> Result<(), String> {
         if let Some(editor) = &self.automation {
-            editor.require_focus(self.focus)?;
+            editor.require_focus(self.focus)
+        } else {
+            self.focus.require_current()
+        }
+    }
+
+    fn writable(&self) -> Result<(), String> {
+        self.require_focus()?;
+        if let Some(editor) = &self.automation {
             editor.require_writable()
         } else if self.focus.is_native_edit() && self.focus.writable_native() {
             Ok(())
@@ -359,7 +366,7 @@ impl Composition {
         deadline: Instant,
     ) -> Result<(), String> {
         if let Some(error) = self.interrupted.take() {
-            if error != UNCONFIRMED_WRITE {
+            if error != UNCONFIRMED_WRITE && error != FOCUS_CHANGED {
                 return Err(error);
             }
             let original = self.original.as_ref().ok_or_else(|| error.clone())?;

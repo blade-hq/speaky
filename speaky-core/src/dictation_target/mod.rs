@@ -23,7 +23,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 const UNCONFIRMED_WRITE: &str = "无法确认目标已写入，请核对输入框和转写。";
-const FOCUS_CHANGED: &str = "输入焦点已改变，本次转写已保留。";
+const FOCUS_CHANGED: &str = "输入焦点已改变。";
 const UNSUPPORTED: &str = "此输入框无法安全地插入转写，请复制结果。";
 const NO_EDITOR: &str = "没有找到可写的输入框。请点一下聊天输入框，再启动听写。";
 
@@ -132,15 +132,22 @@ enum EditRequest {
     Final {
         text: String,
         deadline: Instant,
-        reply: mpsc::SyncSender<Result<(), String>>,
+        reply: mpsc::SyncSender<FinalDelivery>,
     },
+}
+
+enum FinalDelivery {
+    TargetChanged,
+    Finished(Result<(), String>),
 }
 
 #[derive(Clone)]
 pub struct DictationTarget {
+    focus: Focus,
     writer: mpsc::Sender<EditRequest>,
     sequence: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
+    initialized: Arc<AtomicBool>,
     issue: Arc<Mutex<Option<String>>>,
 }
 
@@ -150,28 +157,19 @@ pub enum Foreground {
 }
 
 impl DictationTarget {
-    pub fn capture() -> Option<Self> {
-        let (target, ready) = Self::capture_field(Focus::current()?)?;
-        ready.recv_timeout(Duration::from_secs(4)).ok()?;
-        Some(target)
-    }
-
     pub fn capture_foreground() -> Foreground {
         let (own, focus) = foreground_focus();
         if own {
             Foreground::Speaky
         } else {
-            Foreground::External(
-                focus
-                    .and_then(Self::capture_field)
-                    .map(|(target, _)| target),
-            )
+            Foreground::External(focus.and_then(Self::capture_field))
         }
     }
 
-    fn capture_field(focus: Focus) -> Option<(Self, mpsc::Receiver<()>)> {
+    fn capture_field(focus: Focus) -> Option<Self> {
         let (writer, incoming) = mpsc::channel::<EditRequest>();
-        let (ready, capture) = mpsc::sync_channel(1);
+        let initialized = Arc::new(AtomicBool::new(false));
+        let worker_initialized = initialized.clone();
         let sequence = Arc::new(AtomicU64::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let latest = sequence.clone();
@@ -209,7 +207,7 @@ impl DictationTarget {
                 };
                 let editor = live::Editor::new(focus, automation);
                 let mut composition = live::Composition::capture(&editor);
-                let _ = ready.send(());
+                worker_initialized.store(true, Ordering::Release);
                 for request in incoming {
                     match request {
                         EditRequest::Preview { sequence, text } => {
@@ -227,22 +225,30 @@ impl DictationTarget {
                             deadline,
                             reply,
                         } => {
-                            let _ = reply.send(composition.finish(&editor, &text, deadline));
+                            let result = match editor.require_focus() {
+                                Ok(()) => FinalDelivery::Finished(
+                                    composition.finish(&editor, &text, deadline),
+                                ),
+                                Err(error) if error == FOCUS_CHANGED => {
+                                    FinalDelivery::TargetChanged
+                                }
+                                Err(error) => FinalDelivery::Finished(Err(error)),
+                            };
+                            let _ = reply.send(result);
                             break;
                         }
                     }
                 }
             })
             .ok()?;
-        Some((
-            Self {
-                writer,
-                sequence,
-                stopped,
-                issue,
-            },
-            capture,
-        ))
+        Some(Self {
+            focus,
+            writer,
+            sequence,
+            stopped,
+            initialized,
+            issue,
+        })
     }
 
     pub fn delivery_issue(&self) -> Option<String> {
@@ -264,10 +270,33 @@ impl DictationTarget {
         self.stopped.store(true, Ordering::Release);
     }
 
-    pub fn insert(&self, text: &str) -> Result<(), String> {
+    pub fn deliver_final(previous: Option<&Self>, text: &str) -> Result<bool, String> {
         if text.is_empty() || text.contains('\0') {
             return Err("没有可写入的有效文本。".into());
         }
+        let (own, focus) = foreground_focus();
+        if own {
+            return Ok(false);
+        }
+        let focus = focus.ok_or(NO_EDITOR)?;
+        if let Some(previous) = previous.filter(|previous| previous.focus == focus) {
+            match previous.insert(text) {
+                Ok(FinalDelivery::Finished(result)) => return result.map(|()| true),
+                Ok(FinalDelivery::TargetChanged) => {}
+                Err(error) if previous.initialized.load(Ordering::Acquire) => return Err(error),
+                // The original field failed capture before it could receive any preview.
+                Err(_) => {}
+            }
+        }
+
+        let target = Self::capture_field(focus).ok_or(NO_EDITOR)?;
+        match target.insert(text)? {
+            FinalDelivery::Finished(result) => result.map(|()| true),
+            FinalDelivery::TargetChanged => Err(FOCUS_CHANGED.into()),
+        }
+    }
+
+    fn insert(&self, text: &str) -> Result<FinalDelivery, String> {
         self.stop_preview();
         let (reply, result) = mpsc::sync_channel(1);
         // A preview already writing to the editor must complete before the final replacement.
@@ -285,7 +314,7 @@ impl DictationTarget {
         result.recv_timeout(Duration::from_secs(7)).map_err(|_| {
             self.delivery_issue()
                 .unwrap_or_else(|| UNSUPPORTED.to_owned())
-        })?
+        })
     }
 }
 
