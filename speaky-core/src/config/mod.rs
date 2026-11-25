@@ -159,6 +159,8 @@ pub struct DesktopConfig {
     pub windows_floating_button: bool,
     #[serde(default)]
     pub preload_local_model: bool,
+    #[serde(default)]
+    pub debug_mode: bool,
 }
 
 fn desktop_default_on() -> bool {
@@ -171,6 +173,7 @@ impl Default for DesktopConfig {
             auto_start: desktop_default_on(),
             windows_floating_button: desktop_default_on(),
             preload_local_model: false,
+            debug_mode: false,
         }
     }
 }
@@ -310,7 +313,110 @@ pub struct EngineConfig {
     pub remote: RemoteService,
     /// Last selected on-device recognizer, kept separately from external services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<OpenAIConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_pack: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub frameworks: std::collections::BTreeMap<String, FrameworkProfile>,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct FrameworkProfile {
+    #[serde(default)]
+    pub api_key: String,
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Framework {
+    pub id: &'static str,
+    pub label: &'static str,
+    port: u16,
+}
+
+impl Framework {
+    pub const ALL: [Self; 8] = [
+        Self::new("funasr", "FunASR", 18761),
+        Self::new("sherpa-onnx", "sherpa-onnx", 18762),
+        Self::new("wenet", "WeNet", 18763),
+        Self::new("vosk", "Vosk", 18764),
+        Self::new("nemo", "NeMo", 18765),
+        Self::new("espnet", "ESPnet", 18766),
+        Self::new("speechbrain", "SpeechBrain", 18767),
+        Self::new("kaldi", "Kaldi", 18768),
+    ];
+
+    const fn new(id: &'static str, label: &'static str, port: u16) -> Self {
+        Self { id, label, port }
+    }
+
+    pub fn selected(config: &Config) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|framework| framework.id == config.engine.current)
+    }
+
+    pub fn preset_name(self) -> &'static str {
+        #[derive(Deserialize)]
+        struct Preset<'a> {
+            framework: &'a str,
+            model: &'a str,
+        }
+        static PRESETS: once_cell::sync::Lazy<Vec<Preset<'static>>> =
+            once_cell::sync::Lazy::new(|| {
+                serde_json::from_str(include_str!("../../../scripts/asr-presets.json"))
+                    .expect("invalid bundled ASR preset catalog")
+            });
+        PRESETS
+            .iter()
+            .find(|p| p.framework == self.id)
+            .expect("missing ASR preset")
+            .model
+    }
+
+    pub fn display_model(self, model: &str) -> String {
+        if model == self.id {
+            format!("{}（服务未提供模型名）", self.label)
+        } else {
+            model.to_owned()
+        }
+    }
+
+    pub fn is_builtin_endpoint(self, address: &str) -> bool {
+        reqwest::Url::parse(address).is_ok_and(|url| {
+            url.scheme() == "http"
+                && crate::engines::loopback(&url)
+                && url.port() == Some(self.port)
+                && url.path().trim_end_matches('/') == "/v1"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+    }
+
+    pub fn service(self, config: &Config) -> OpenAIConfig {
+        let profile = config
+            .engine
+            .frameworks
+            .get(self.id)
+            .cloned()
+            .unwrap_or_default();
+        let base_url = profile
+            .base_url
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}/v1", self.port));
+        let mut model = profile.model.unwrap_or_else(|| self.id.to_owned());
+        if model == self.id && self.is_builtin_endpoint(&base_url) {
+            model = self.preset_name().to_owned();
+        }
+        OpenAIConfig {
+            api_key: profile.api_key,
+            model,
+            base_url,
+            use_vocabulary_prompt: false,
+        }
+    }
 }
 
 fn default_engine() -> String {
@@ -324,7 +430,9 @@ impl Default for EngineConfig {
             volc_bigmodel: VolcBigModelConfig::default(),
             openai: OpenAIConfig::default(),
             remote: RemoteService::default(),
+            local: None,
             local_pack: None,
+            frameworks: Default::default(),
         }
     }
 }

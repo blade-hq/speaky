@@ -18,6 +18,84 @@ use windows::Win32::{
     },
 };
 
+pub(super) fn active_monitor() -> HMONITOR {
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, MonitorFromWindow, HDC, MONITOR_DEFAULTTONEAREST,
+    };
+    if std::env::var_os("SPEAKY_START_ON_SECONDARY").is_some_and(|v| v == "1") {
+        unsafe extern "system" fn secondary(
+            monitor: HMONITOR,
+            _: HDC,
+            _: *mut RECT,
+            data: LPARAM,
+        ) -> windows::core::BOOL {
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(monitor, &mut info).as_bool()
+                && info.dwFlags & MONITORINFOF_PRIMARY == 0
+            {
+                *(data.0 as *mut Option<HMONITOR>) = Some(monitor);
+                return false.into();
+            }
+            true.into()
+        }
+        let mut found: Option<HMONITOR> = None;
+        unsafe {
+            let _ = EnumDisplayMonitors(
+                None,
+                None,
+                Some(secondary),
+                LPARAM((&mut found as *mut Option<HMONITOR>) as isize),
+            );
+        }
+        if let Some(monitor) = found {
+            return monitor;
+        }
+    }
+    unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST) }
+}
+
+pub(super) fn monitor_scale(monitor: HMONITOR, fallback: f32) -> f32 {
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    let (mut x, mut y) = (0, 0);
+    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) }.is_ok() && x != 0 {
+        x as f32 / 96.
+    } else {
+        fallback
+    }
+}
+
+pub(super) fn display_id(monitor: HMONITOR, cx: &gpui::App) -> Option<gpui::DisplayId> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC};
+    unsafe extern "system" fn collect(
+        monitor: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        data: LPARAM,
+    ) -> windows::core::BOOL {
+        (*(data.0 as *mut Vec<HMONITOR>)).push(monitor);
+        true.into()
+    }
+    let mut monitors = Vec::<HMONITOR>::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect),
+            LPARAM((&mut monitors as *mut Vec<HMONITOR>) as isize),
+        );
+    }
+    let index = monitors
+        .iter()
+        .position(|candidate| *candidate == monitor)?;
+    cx.displays()
+        .into_iter()
+        .nth(index)
+        .map(|display| display.id())
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct Position {
     pub(super) x: i32,
@@ -36,6 +114,25 @@ impl Position {
 pub(super) fn saved_position(filename: &str) -> Option<Position> {
     let data = fs::read(Config::config_dir().join(filename)).ok()?;
     serde_json::from_slice(&data).ok()
+}
+
+#[cfg(test)]
+#[test]
+fn floating_positions_stay_inside_negative_origin_and_small_work_areas() {
+    let work = RECT {
+        left: -1920,
+        top: 165,
+        right: 0,
+        bottom: 1197,
+    };
+    assert_eq!(
+        Position { x: 200, y: 1400 }.clamp_to(work, 430, 70),
+        Position { x: -430, y: 1127 }
+    );
+    assert_eq!(
+        Position { x: -2100, y: -200 }.clamp_to(work, 430, 70),
+        Position { x: -1920, y: 165 }
+    );
 }
 
 pub(super) fn monitor_work_area(monitor: HMONITOR) -> Option<RECT> {

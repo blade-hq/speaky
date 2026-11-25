@@ -1,5 +1,59 @@
 use std::time::Instant;
 
+pub fn open_recording(
+    config: &crate::config::Config,
+    path: &std::path::Path,
+    resume: bool,
+) -> Result<(DurableRecorder, LivePreview), String> {
+    let asr = &config.core.asr;
+    let mut recorder = crate::audio::AudioRecorder::new_with_name(
+        asr.audio_device,
+        asr.audio_device_name.as_deref(),
+        asr.audio_gain,
+    )?;
+    if resume {
+        let wav = std::fs::read(path).map_err(|e| e.to_string())?;
+        recorder.resume_wav(&wav)?;
+    } else {
+        recorder.start()?;
+    }
+    let preview = LivePreview::new(recorder.sample_count());
+    Ok((
+        DurableRecorder {
+            recorder,
+            path: path.to_owned(),
+        },
+        preview,
+    ))
+}
+
+/// Also protects audio opened on a worker if its UI disappears before delivery.
+pub struct DurableRecorder {
+    recorder: crate::audio::AudioRecorder,
+    path: std::path::PathBuf,
+}
+impl std::ops::Deref for DurableRecorder {
+    type Target = crate::audio::AudioRecorder;
+    fn deref(&self) -> &Self::Target {
+        &self.recorder
+    }
+}
+impl std::ops::DerefMut for DurableRecorder {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.recorder
+    }
+}
+impl Drop for DurableRecorder {
+    fn drop(&mut self) {
+        if self.recorder.is_recording() {
+            let audio = self.recorder.stop();
+            if let Err(error) = crate::drafts::save(&self.path, &audio) {
+                log::error!("无法保存中断录音 {}：{error}", self.path.display());
+            }
+        }
+    }
+}
+
 pub const SAMPLE_AUDIO: &[u8] = include_bytes!("../assets/settings-sample.wav");
 
 #[derive(Default)]

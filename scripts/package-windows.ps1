@@ -11,8 +11,24 @@ $exe = Get-Item -LiteralPath $Executable
 $files = [ordered]@{
     'speaky-gpui.exe' = $exe.FullName
     'start-windows.cmd' = Join-Path $root 'start-windows.cmd'
+    'start-asr.cmd' = Join-Path $root 'start-asr.cmd'
+    'scripts/start-asr.ps1' = Join-Path $PSScriptRoot 'start-asr.ps1'
+    'scripts/asr-presets.json' = Join-Path $PSScriptRoot 'asr-presets.json'
+    'scripts/asr_bridge.py' = Join-Path $PSScriptRoot 'asr_bridge.py'
+    'scripts/asr_adapters_light.py' = Join-Path $PSScriptRoot 'asr_adapters_light.py'
+    'scripts/asr_adapters_research.py' = Join-Path $PSScriptRoot 'asr_adapters_research.py'
+    'docs/ASR-frameworks.md' = Join-Path $root 'docs/ASR-frameworks.md'
     'scripts/start-windows.ps1' = Join-Path $PSScriptRoot 'start-windows.ps1'
-    'config.example.yaml' = Join-Path $root 'config.example.yaml'
+    'scripts/serve_qwen_asr.py' = Join-Path $PSScriptRoot 'serve_qwen_asr.py'
+    'scripts/local-models.ps1' = Join-Path $PSScriptRoot 'local-models.ps1'
+    'scripts/local_models.py' = Join-Path $PSScriptRoot 'local_models.py'
+    'scripts/share-windows-models.py' = Join-Path $PSScriptRoot 'share-windows-models.py'
+    'scripts/shared_windows_models.py' = Join-Path $PSScriptRoot 'shared_windows_models.py'
+    'scripts/gpu_worker.py' = Join-Path $PSScriptRoot 'gpu_worker.py'
+    'scripts/sense_gpu.py' = Join-Path $PSScriptRoot 'sense_gpu.py'
+    'scripts/whisper_gpu.py' = Join-Path $PSScriptRoot 'whisper_gpu.py'
+    'scripts/whisper_gpu_bridge.dll' = Join-Path $PSScriptRoot 'whisper_gpu_bridge.dll'
+    'docs/Win7部署说明.md' = Join-Path $root 'docs/Win7部署说明.md'
 }
 if ($WhisperRuntime) {
     foreach ($name in @('whisper-server.exe', 'LICENSE')) {
@@ -22,20 +38,10 @@ if ($WhisperRuntime) {
 }
 $guide = Get-Item (Join-Path $root 'docs/Windows*.md')
 $files["docs/$($guide.Name)"] = $guide.FullName
-# Bundle redistributable MSVC runtime files when available from Build Tools.
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-$crt = if ($env:VCToolsRedistDir) { $env:VCToolsRedistDir } elseif (Test-Path -LiteralPath $vswhere) {
-    $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if ($vs) {
-        Get-ChildItem (Join-Path $vs 'VC/Redist/MSVC') -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
-            Sort-Object { [version]$_.Name } -Descending |
-            Select-Object -First 1 -ExpandProperty FullName
-    }
-}
-if ($crt) {
-    Get-ChildItem (Join-Path $crt 'x64/Microsoft.VC*.CRT/*.dll') -ErrorAction SilentlyContinue |
-        ForEach-Object { $files[$_.Name] = $_.FullName }
+# GNU builds can place their required runtime libraries beside the executable.
+foreach ($name in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+    $runtime = Join-Path $exe.DirectoryName $name
+    if (Test-Path -LiteralPath $runtime) { $files[$name] = $runtime }
 }
 $dest = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 $archive = [IO.Compression.ZipFile]::Open($dest, [IO.Compression.ZipArchiveMode]::Create)

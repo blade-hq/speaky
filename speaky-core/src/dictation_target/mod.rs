@@ -12,8 +12,8 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, IsWindowEnabled, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_CONTROL, VK_LEFT, VK_LWIN,
-    VK_MENU, VK_RWIN, VK_SHIFT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_BACK, VK_CONTROL, VK_LEFT,
+    VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongW,
@@ -125,6 +125,12 @@ fn foreground_focus() -> (bool, Option<Focus>) {
 }
 
 enum EditRequest {
+    Freeze {
+        reply: mpsc::SyncSender<Result<(), String>>,
+    },
+    Cancel {
+        reply: mpsc::SyncSender<Result<(), String>>,
+    },
     Preview {
         sequence: u64,
         text: String,
@@ -147,13 +153,24 @@ pub struct DictationTarget {
     writer: mpsc::Sender<EditRequest>,
     sequence: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
-    initialized: Arc<AtomicBool>,
     issue: Arc<Mutex<Option<String>>>,
 }
 
 pub enum Foreground {
     Speaky,
     External(Option<DictationTarget>),
+}
+
+#[derive(Clone, Copy)]
+pub struct StopFocus(Option<Focus>);
+impl StopFocus {
+    pub fn capture() -> Self {
+        Self(foreground_focus().1)
+    }
+}
+
+pub fn copy_fallback(text: &str) -> Result<(), String> {
+    clipboard::copy_text(text)
 }
 
 impl DictationTarget {
@@ -168,8 +185,6 @@ impl DictationTarget {
 
     fn capture_field(focus: Focus) -> Option<Self> {
         let (writer, incoming) = mpsc::channel::<EditRequest>();
-        let initialized = Arc::new(AtomicBool::new(false));
-        let worker_initialized = initialized.clone();
         let sequence = Arc::new(AtomicU64::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let latest = sequence.clone();
@@ -207,9 +222,21 @@ impl DictationTarget {
                 };
                 let editor = live::Editor::new(focus, automation);
                 let mut composition = live::Composition::capture(&editor);
-                worker_initialized.store(true, Ordering::Release);
                 for request in incoming {
                     match request {
+                        EditRequest::Freeze { reply } => {
+                            // A browser can host several fields behind the same HWND.
+                            // Compare the captured UIA element before retaining its preview.
+                            let _ = reply.send(editor.require_focus());
+                        }
+                        EditRequest::Cancel { reply } => {
+                            let result = composition.cancel(&editor);
+                            if let Err(error) = &result {
+                                *worker_issue.lock().unwrap() = Some(error.clone());
+                            }
+                            let _ = reply.send(result);
+                            break;
+                        }
                         EditRequest::Preview { sequence, text } => {
                             if finished.load(Ordering::Acquire)
                                 || sequence != latest.load(Ordering::Acquire)
@@ -246,7 +273,6 @@ impl DictationTarget {
             writer,
             sequence,
             stopped,
-            initialized,
             issue,
         })
     }
@@ -270,28 +296,70 @@ impl DictationTarget {
         self.stopped.store(true, Ordering::Release);
     }
 
-    pub fn deliver_final(previous: Option<&Self>, text: &str) -> Result<bool, String> {
-        if text.is_empty() || text.contains('\0') {
-            return Err("没有可写入的有效文本。".into());
-        }
-        let (own, focus) = foreground_focus();
-        if own {
-            return Ok(false);
-        }
-        let focus = focus.ok_or(NO_EDITOR)?;
-        if let Some(previous) = previous.filter(|previous| previous.focus == focus) {
-            match previous.insert(text) {
-                Ok(FinalDelivery::Finished(result)) => return result.map(|()| true),
-                Ok(FinalDelivery::TargetChanged) => {}
-                Err(error) if previous.initialized.load(Ordering::Acquire) => return Err(error),
-                // The original field failed capture before it could receive any preview.
-                Err(_) => {}
+    /// Capture synchronously at the stop gesture, before saving/ASR/LLM can change focus.
+    pub fn capture_at_stop(previous: Option<&Self>) -> Result<Self, String> {
+        Self::capture_stopped(StopFocus::capture(), previous)
+    }
+
+    pub fn capture_stopped(stopped: StopFocus, previous: Option<&Self>) -> Result<Self, String> {
+        let focus = stopped.0;
+        if let Some(previous) = previous {
+            previous.stop_preview();
+            let mut capture_error = None;
+            if Some(previous.focus) == focus {
+                match previous.freeze_at_stop(previous.focus.is_native_edit()) {
+                    Ok(()) => return Ok(previous.clone()),
+                    // The focused HWND is unchanged, but another UIA field owns focus.
+                    Err(error) if error == FOCUS_CHANGED => {}
+                    Err(error) => capture_error = Some(error),
+                }
+            }
+            let previous = previous.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = previous.cancel_preview() {
+                    log::warn!("清理听写预览失败：{error}");
+                }
+            });
+            if let Some(error) = capture_error {
+                return Err(error);
             }
         }
-
+        let focus = focus.ok_or(NO_EDITOR)?;
         let target = Self::capture_field(focus).ok_or(NO_EDITOR)?;
-        match target.insert(text)? {
-            FinalDelivery::Finished(result) => result.map(|()| true),
+        target.freeze_at_stop(focus.is_native_edit())?;
+        Ok(target)
+    }
+
+    fn freeze_at_stop(&self, native: bool) -> Result<(), String> {
+        if native {
+            return Ok(());
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        self.writer
+            .send(EditRequest::Freeze { reply })
+            .map_err(|_| self.delivery_issue().unwrap_or_else(|| UNSUPPORTED.into()))?;
+        result
+            .recv_timeout(Duration::from_millis(150))
+            .map_err(|_| "无法及时确认停止时的输入框，请从剪贴板粘贴。".to_owned())?
+    }
+
+    pub fn cancel_preview(&self) -> Result<(), String> {
+        self.stop_preview();
+        let (reply, result) = mpsc::sync_channel(1);
+        self.writer
+            .send(EditRequest::Cancel { reply })
+            .map_err(|_| self.delivery_issue().unwrap_or_else(|| UNSUPPORTED.into()))?;
+        result
+            .recv_timeout(Duration::from_secs(4))
+            .map_err(|_| UNSUPPORTED.to_owned())?
+    }
+
+    pub fn deliver(&self, text: &str) -> Result<(), String> {
+        if text.trim().is_empty() || text.contains('\0') {
+            return Err("没有可写入的有效文本。".into());
+        }
+        match self.insert(text)? {
+            FinalDelivery::Finished(result) => result,
             FinalDelivery::TargetChanged => Err(FOCUS_CHANGED.into()),
         }
     }
@@ -729,6 +797,56 @@ mod clipboard;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target_with_worker(writer: mpsc::Sender<EditRequest>) -> DictationTarget {
+        DictationTarget {
+            focus: Focus {
+                foreground: 0,
+                control: 0,
+                process: 0,
+                thread: 0,
+            },
+            writer,
+            sequence: Arc::new(AtomicU64::new(0)),
+            stopped: Arc::new(AtomicBool::new(false)),
+            issue: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn stop_field_check_distinguishes_fields_sharing_a_window() {
+        for expected in [Ok(()), Err(FOCUS_CHANGED.to_owned())] {
+            let (writer, incoming) = mpsc::channel();
+            let target = target_with_worker(writer);
+            let response = expected.clone();
+            let worker = std::thread::spawn(move || {
+                let EditRequest::Freeze { reply } = incoming.recv().unwrap() else {
+                    panic!("expected a stop-time field check");
+                };
+                reply.send(response).unwrap();
+            });
+            assert_eq!(target.freeze_at_stop(false), expected);
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn unresponsive_stop_field_check_fails_without_waiting_for_the_preview() {
+        let (writer, incoming) = mpsc::channel();
+        let target = target_with_worker(writer);
+        assert!(target.freeze_at_stop(false).is_err());
+        assert!(matches!(
+            incoming.try_recv().unwrap(),
+            EditRequest::Freeze { .. }
+        ));
+        // Native HWNDs identify the field without a UIA round-trip.
+        assert!(target.freeze_at_stop(true).is_ok());
+        assert!(matches!(
+            incoming.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
     #[test]
     fn unicode_packets_preserve_surrogate_pairs_without_synthesizing_virtual_keys() {
         let packets = unicode_packets("甲🦀").unwrap();

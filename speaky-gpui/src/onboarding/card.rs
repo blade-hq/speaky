@@ -218,6 +218,29 @@ impl Speaky {
                     )
                 })
                 .children(sample)
+                .when(step == Step::Language, |panel| {
+                    let selected = crate::config::Config::load()
+                        .unwrap_or_default()
+                        .core
+                        .asr
+                        .language;
+                    panel.child(
+                        div().flex().flex_wrap().gap_1().children(
+                            speaky_core::session::LANGUAGES
+                                .into_iter()
+                                .map(|(code, label)| {
+                                    guide_button(
+                                        label,
+                                        (label, Action::Language(code)),
+                                        selected == code,
+                                        false,
+                                        epoch,
+                                        cx,
+                                    )
+                                }),
+                        ),
+                    )
+                })
                 .when_some(words.notice, |panel, notice| {
                     panel.child(
                         div()
@@ -436,6 +459,16 @@ impl Speaky {
         } else {
             match step {
                 Step::Welcome => unreachable!("the welcome uses its own layout"),
+                Step::Permissions => {
+                    let words = Copy::new(Icon::Microphone, "开通所需权限", "允许麦克风访问。macOS 还需允许辅助功能，才能向其他应用输入文字。")
+                        .tool("允许并检测麦克风", Action::CheckMicrophone);
+                    #[cfg(target_os = "macos")]
+                    let words = words.tool("允许辅助功能", Action::Accessibility);
+                    words
+                }
+                Step::Shortcut => Copy::new(Icon::Settings, "熟悉听写快捷键", "按一次开始，再按一次停止并保存。录音中可以切换应用；Esc 取消转写并保留音频。")
+                    .tool("设置快捷键", Action::Shortcut),
+                Step::Language => Copy::new(Icon::Model, "选择常用识别语言", "推荐选择你主要使用的语言；经常切换语言时选择自动检测。"),
                 Step::Microphone => self.microphone_copy(),
                 Step::Model => self.model_copy(),
                 Step::Record if self.recording.is_some() => Copy::new(
@@ -473,6 +506,8 @@ impl Speaky {
                     }
                 }
                 Step::Result => self.result_copy(scene),
+                Step::Practice => Copy::new(Icon::Guide, "试一次真实输入", "切到任意应用的输入框，按听写快捷键说一句，再按一次结束。文字会写入停止时的输入框，由你决定发送。完成后返回继续。")
+                    .tool("查看或更改快捷键", Action::Shortcut),
                 Step::Finish => Copy::new(
                     Icon::Home,
                     "工作台已就绪",
@@ -522,7 +557,6 @@ impl Speaky {
     }
 
     fn model_copy(&self) -> Copy {
-        #[cfg(windows)]
         if self.page == Page::Home {
             if self.model_picker.guide_has_no_models() {
                 return Copy::new(

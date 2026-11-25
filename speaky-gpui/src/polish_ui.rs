@@ -1,8 +1,5 @@
 use crate::{
-    button,
-    config::Config,
-    drafts, polish, polish_benchmark, polish_preferences,
-    settings::detail,
+    button, config::Config, drafts, polish, polish_benchmark, polish_preferences, settings::detail,
     Speaky,
 };
 use gpui::{div, prelude::*, px, ClipboardItem, Context, Div};
@@ -66,17 +63,9 @@ impl Speaky {
             if !config.llm.enabled {
                 return Err("请在设置中启用语音整理。".to_owned());
             }
-            let profile = if !config.llm.custom_prompt.trim().is_empty() {
-                None
-            } else if config.llm.learns_preferences() {
-                Some(polish_preferences::load(&config.llm.openai)?.next_candidate())
-            } else {
-                Some(polish::Profile::Balanced)
-            };
-            let prompt = profile.map_or(config.llm.custom_prompt, polish::Profile::prompt);
-            Ok((config.llm.openai, profile, prompt))
+            Ok(config)
         })();
-        let (service, profile, prompt) = match setup {
+        let config = match setup {
             Ok(setup) => setup,
             Err(error) => {
                 self.organizer.notice = Some((path, error));
@@ -86,15 +75,9 @@ impl Speaky {
         };
         self.organizer.pending = Some(path.clone());
         self.organizer.notice = None;
+        let request_path = path.clone();
         let task = cx.background_spawn(async move {
-            let text = polish::organize_with_prompt(&service, &prompt, &source)?;
-            Ok::<_, String>(drafts::Organized {
-                source,
-                text,
-                base_url: service.base_url,
-                model: service.model,
-                profile,
-            })
+            crate::pipeline::organize_saved(&config, &request_path, &source)
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;

@@ -2,7 +2,10 @@ use super::{openai::RUNTIME, Protocol, RemoteEngine};
 use crate::config::RemoteService;
 use reqwest::Url;
 use serde::Deserialize;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use crate::session::SAMPLE_AUDIO as SAMPLE;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
@@ -59,8 +62,13 @@ fn candidates(address: &str) -> Result<Vec<(Protocol, Url)>, String> {
     Ok(routes)
 }
 
-// A catalog can supply a missing model ID. Only transcribing the sample establishes readiness.
-fn single_model(endpoint: &Url, api_key: &str, remaining: Duration) -> Result<String, String> {
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(4);
+
+fn read_model_catalog(
+    endpoint: &Url,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
     #[derive(Deserialize)]
     struct Model {
         id: String,
@@ -78,7 +86,7 @@ fn single_model(endpoint: &Url, api_key: &str, remaining: Duration) -> Result<St
     RUNTIME.block_on(async {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(remaining.min(Duration::from_secs(4)))
+            .timeout(timeout.min(CATALOG_TIMEOUT))
             .build()
             .map_err(|e| e.to_string())?;
         let mut request = client.get(catalog_url);
@@ -104,11 +112,56 @@ fn single_model(endpoint: &Url, api_key: &str, remaining: Duration) -> Result<St
         }
         let catalog: Catalog =
             serde_json::from_slice(&body).map_err(|_| "无法识别模型列表，请填写模型 ID。")?;
-        match catalog.data.as_slice() {
-            [model] if !model.id.trim().is_empty() => Ok(model.id.trim().into()),
-            _ => Err("未找到唯一模型，请填写要使用的转写模型 ID。".into()),
-        }
+        let mut seen = HashSet::new();
+        let models = catalog
+            .data
+            .into_iter()
+            .map(|model| model.id.trim().to_owned())
+            .filter(|id| !id.is_empty() && !id.chars().any(char::is_control))
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        Ok(models)
     })
+}
+
+#[derive(Debug)]
+pub struct ModelCatalog {
+    pub endpoint: String,
+    pub models: Vec<String>,
+}
+
+pub fn list_models(address: &str, api_key: &str) -> Result<ModelCatalog, String> {
+    let mut error = None;
+    for (protocol, endpoint) in candidates(address)? {
+        if protocol != Protocol::OpenAI {
+            continue;
+        }
+        match read_model_catalog(&endpoint, api_key.trim(), CATALOG_TIMEOUT) {
+            Ok(models) if !models.is_empty() => {
+                return Ok(ModelCatalog {
+                    endpoint: endpoint.to_string(),
+                    models,
+                });
+            }
+            Ok(_) => {
+                error.get_or_insert_with(|| "服务没有返回可选模型，可手动填写模型 ID。".into());
+            }
+            Err(reason) => {
+                error.get_or_insert(reason);
+            }
+        }
+    }
+    Err(error.unwrap_or_else(|| "此服务没有模型列表，可手动填写模型 ID。".into()))
+}
+
+// A catalog can supply a missing model ID. Only transcribing the sample establishes readiness.
+fn single_model(endpoint: &Url, api_key: &str, remaining: Duration) -> Result<String, String> {
+    let mut models = read_model_catalog(endpoint, api_key, remaining)?;
+    if models.len() == 1 {
+        Ok(models.remove(0))
+    } else {
+        Err("未找到唯一模型，请填写要使用的转写模型 ID。".into())
+    }
 }
 
 pub fn detect_service(
@@ -218,6 +271,21 @@ mod tests {
             }
         });
         (address, server)
+    }
+
+    #[test]
+    fn lists_available_models_without_selecting_one() {
+        let (server, handle) = http_fixture(vec![(
+            "GET /speech/v1/models",
+            r#"{"data":[{"id":"sensevoice"},{"id":"vosk"},{"id":" vosk "},{"id":""}]}"#,
+        )]);
+        let catalog = list_models(&format!("{server}/speech/v1/"), "test-token").unwrap();
+        assert_eq!(
+            catalog.endpoint,
+            format!("{server}/speech/v1/audio/transcriptions")
+        );
+        assert_eq!(catalog.models, ["sensevoice", "vosk"]);
+        handle.join().unwrap();
     }
 
     #[test]

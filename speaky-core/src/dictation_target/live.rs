@@ -77,6 +77,10 @@ impl Editor {
 
     fn snapshot(&self) -> Result<Selection, String> {
         self.writable()?;
+        self.snapshot_contents()
+    }
+
+    fn snapshot_contents(&self) -> Result<Selection, String> {
         if let Some(editor) = &self.automation {
             unsafe {
                 let pattern: IUIAutomationTextPattern =
@@ -132,12 +136,20 @@ impl Editor {
         let count = self
             .focus
             .message(WM_GETTEXT, buffer.len(), buffer.as_mut_ptr() as isize)?;
-        let (mut start, mut end) = (0u32, 0u32);
-        self.focus.message(
+        let (mut start, mut end) = (u32::MAX, u32::MAX);
+        let packed = self.focus.message(
             EM_GETSEL,
             (&mut start as *mut u32) as usize,
             (&mut end as *mut u32) as isize,
         )?;
+        // The packed result crosses process boundaries without depending on
+        // optional out-pointer marshalling. Never mistake untouched pointers for caret 0.
+        if packed as u32 != u32::MAX {
+            start = (packed as u32) & 0xffff;
+            end = ((packed as u32) >> 16) & 0xffff;
+        } else if start == u32::MAX || end == u32::MAX {
+            return Err(UNSUPPORTED.into());
+        }
         let (a, b) = (start as usize, end as usize);
         if a > b || b > count || count >= buffer.len() {
             return Err(UNSUPPORTED.into());
@@ -291,7 +303,145 @@ pub(super) struct Composition {
     interrupted: Option<String>,
 }
 
+fn cancellation_span(
+    current: &str,
+    original: &Selection,
+    attempted: Option<&str>,
+    written: Option<&str>,
+) -> Option<(usize, usize)> {
+    let remaining = current.strip_prefix(&original.before)?;
+    if written.is_some()
+        && !original.selected.is_empty()
+        && current == [&*original.before, &*original.after].concat()
+    {
+        // The selected original also belongs to the user. Restore it if an
+        // acknowledged replacement has since been completely removed.
+        return Some((original.before.len(), original.before.len()));
+    }
+    // A write can fail before changing the field at all. An attempted hypothesis
+    // that happens to prefix the user's original text is not evidence of an edit.
+    let attempted =
+        attempted.filter(|text| current == [&*original.before, text, &*original.after].concat());
+    [written, attempted]
+        .into_iter()
+        .flatten()
+        .filter(|text| !text.is_empty())
+        .filter(|text| remaining.starts_with(text))
+        .max_by_key(|text| text.len())
+        .map(|text| (original.before.len(), original.before.len() + text.len()))
+}
+
 impl Composition {
+    pub(super) fn cancel(&mut self, editor: &Editor) -> Result<(), String> {
+        if self.written.is_none() && self.attempted.is_none() {
+            return Ok(());
+        }
+        let original = self.original.clone().ok_or(EDIT_CHANGED)?;
+        let current = editor.snapshot_contents()?;
+        let document = [&*current.before, &*current.selected, &*current.after].concat();
+        if document == [&*original.before, &*original.selected, &*original.after].concat() {
+            self.written = None;
+            self.attempted = None;
+            return Ok(());
+        }
+        let (start, end) = cancellation_span(
+            &document,
+            &original,
+            self.attempted.as_deref(),
+            self.written.as_deref(),
+        )
+        .ok_or("听写预览已有手动修改，已保留修改；请检查输入框中的文字。")?;
+        // No synthetic keys or focus changes: only restore an exact, known composition.
+        if let Some(automation) = &editor.automation {
+            automation.require_writable()?;
+            let value = [&document[..start], &original.selected, &document[end..]].concat();
+            unsafe {
+                if let Ok(pattern) = automation
+                    .field
+                    .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                {
+                    readable(pattern.SetValue(&BSTR::from(value)))?;
+                } else {
+                    // Text-only providers (including contenteditable) can clear their
+                    // exact preview through a verified selection while still focused.
+                    editor.require_focus()?;
+                    let pattern: IUIAutomationTextPattern =
+                        readable(automation.field.GetCurrentPatternAs(UIA_TextPatternId))?;
+                    let range = readable(pattern.DocumentRange())?;
+                    let range =
+                        readable(range.FindText(&BSTR::from(&document[start..end]), false, false))?;
+                    readable(range.Select())?;
+                    let expected = Selection {
+                        before: document[..start].into(),
+                        selected: document[start..end].into(),
+                        after: document[end..].into(),
+                    };
+                    editor.check_selection(&expected)?;
+                    editor.require_focus()?;
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    if original.selected.is_empty() {
+                        send_inputs(&[
+                            virtual_key(VK_BACK, 0),
+                            virtual_key(VK_BACK, KEYEVENTF_KEYUP),
+                        ])?;
+                    } else {
+                        editor.write(&original.selected, deadline, Some(&expected))?;
+                    }
+                    editor
+                        .confirm_selection(&expected.after_writing(&original.selected), deadline)?;
+                }
+            }
+        } else {
+            if !editor.focus.writable_native() {
+                return Err(UNSUPPORTED.into());
+            }
+            let (buffer, caret, selection_end) = editor.native_selection()?;
+            let actual = String::from_utf16(&buffer).map_err(|_| UNSUPPORTED)?;
+            if normalized_lines(&actual) != document {
+                return Err(EDIT_CHANGED.into());
+            }
+            let (native_start, native_end) = ["\r\n", "\r", "\n"]
+                .iter()
+                .find_map(|ending| {
+                    let prefix = document[..start].replace('\n', ending);
+                    let through = document[..end].replace('\n', ending);
+                    actual.starts_with(&through).then_some((
+                        prefix.encode_utf16().count(),
+                        through.encode_utf16().count(),
+                    ))
+                })
+                .ok_or(EDIT_CHANGED)?;
+            editor
+                .focus
+                .message(EM_SETSEL, native_start, native_end as isize)?;
+            let text: Vec<_> = original
+                .selected
+                .replace('\n', "\r\n")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            editor
+                .focus
+                .message(EM_REPLACESEL, 1, text.as_ptr() as isize)?;
+            let new_end = native_start + text.len() - 1;
+            let adjust = |offset: usize| {
+                if offset <= native_start {
+                    offset
+                } else if offset < native_end {
+                    new_end
+                } else {
+                    offset - native_end + new_end
+                }
+            };
+            editor
+                .focus
+                .message(EM_SETSEL, adjust(caret), adjust(selection_end) as isize)?;
+        }
+        self.written = None;
+        self.attempted = None;
+        Ok(())
+    }
+
     pub(super) fn capture(editor: &Editor) -> Self {
         Self {
             original: editor.snapshot().ok(),
@@ -323,8 +473,15 @@ impl Composition {
         };
         self.attempted = Some(text.to_owned());
         editor.write(replacement, deadline, Some(&expected))?;
+        if editor.automation.is_none() {
+            // A native EM_REPLACESEL has acknowledged the edit. A user's next
+            // keystroke can arrive before the caret snapshot is confirmed.
+            self.written = self.attempted.take();
+        }
         editor.confirm_selection(&original.after_writing(text), deadline)?;
-        self.written = self.attempted.take();
+        if let Some(attempted) = self.attempted.take() {
+            self.written = Some(attempted);
+        }
         Ok(())
     }
 
@@ -386,6 +543,98 @@ impl Composition {
 #[cfg(test)]
 mod tests {
     use super::{revision, Composition, Selection};
+
+    #[test]
+    fn cancellation_removes_only_known_preview_and_preserves_manual_suffix_edits() {
+        let original = Selection {
+            before: "用户原有：".into(),
+            selected: "选中文字".into(),
+            after: "，尾部".into(),
+        };
+        assert_eq!(
+            super::cancellation_span(
+                "用户原有：临时预览，尾部 手动编辑",
+                &original,
+                None,
+                Some("临时预览")
+            ),
+            Some(("用户原有：".len(), "用户原有：临时预览".len()))
+        );
+        assert!(super::cancellation_span(
+            "用户改写：临时预览，尾部",
+            &original,
+            None,
+            Some("临时预览")
+        )
+        .is_none());
+        assert!(super::cancellation_span(
+            "用户原有：手动改过预览，尾部",
+            &original,
+            None,
+            Some("临时预览")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn cancellation_does_not_infer_an_attempted_write_from_a_matching_prefix() {
+        let original = Selection {
+            before: String::new(),
+            selected: String::new(),
+            after: "hello".into(),
+        };
+        assert!(super::cancellation_span("hello", &original, Some("he"), None).is_none());
+        assert!(
+            super::cancellation_span("hello manually edited", &original, Some("he"), None)
+                .is_none()
+        );
+        assert_eq!(
+            super::cancellation_span("hehello", &original, Some("he"), None),
+            Some((0, 2))
+        );
+    }
+
+    #[test]
+    fn cancelling_a_removed_replacement_restores_the_original_selection() {
+        let original = Selection {
+            before: "前缀".into(),
+            selected: "用户原文".into(),
+            after: "后缀".into(),
+        };
+        assert_eq!(
+            super::cancellation_span("前缀后缀", &original, None, Some("预览")),
+            Some(("前缀".len(), "前缀".len()))
+        );
+        assert!(super::cancellation_span("前缀后缀", &original, Some("预览"), None).is_none());
+    }
+
+    #[test]
+    fn cancellation_keeps_the_entire_confirmed_preview_after_a_failed_shortening() {
+        let original = Selection {
+            before: "Before: ".into(),
+            selected: "selected".into(),
+            after: " after".into(),
+        };
+        let start = original.before.len();
+        assert_eq!(
+            super::cancellation_span(
+                "Before: preview longer after",
+                &original,
+                Some("preview"),
+                Some("preview longer")
+            ),
+            Some((start, start + "preview longer".len()))
+        );
+        assert_eq!(
+            super::cancellation_span(
+                "Before: preview longer after",
+                &original,
+                Some("preview longer"),
+                Some("preview")
+            ),
+            Some((start, start + "preview longer".len()))
+        );
+    }
 
     #[test]
     fn final_write_recovers_only_from_an_exact_known_snapshot() {

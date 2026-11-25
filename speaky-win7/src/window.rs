@@ -7,7 +7,7 @@ use crate::{
 };
 use speaky_core::{
     audio::{AudioRecorder, VoiceActivity},
-    config::Config,
+    config::{Config, RemoteService},
     engines, history,
     hotkey::{GlobalHotkey, HotkeyEvents, Shortcut},
     playback::Playback,
@@ -34,6 +34,7 @@ use windows_sys::Win32::{
             InitCommonControlsEx, EM_GETSEL, EM_SETREADONLY, EM_SETSEL, ICC_STANDARD_CLASSES,
             INITCOMMONCONTROLSEX,
         },
+        Input::KeyboardAndMouse::EnableWindow,
         WindowsAndMessaging::*,
     },
 };
@@ -67,6 +68,8 @@ const PROVIDER: usize = 30;
 const DICTIONARY: usize = 31;
 const SAVE_TERMS: usize = 32;
 const LEARNED: usize = 33;
+const FETCH_MODELS: usize = 34;
+const LOADING_MODELS: &str = "正在获取模型列表…";
 
 thread_local! {
     static STATE: RefCell<Option<Window>> = const { RefCell::new(None) };
@@ -91,11 +94,15 @@ struct Window {
     hotkey: Option<(GlobalHotkey, HotkeyEvents)>,
     updates: Updates,
     events: Receiver<Event>,
-    stop: Option<Sender<()>>,
+    stop: Option<Sender<app::StopRequest>>,
+    cancel_after_start: bool,
+    escape_down: bool,
+    clipboard_notice: Option<(Layer, Instant)>,
     unsaved: Option<app::Pending>,
     retry_transcription: Option<PathBuf>,
     starting: bool,
     stop_after_start: bool,
+    startup_stop: Option<app::StopRequest>,
     working: bool,
     saving_audio: bool,
     exiting: bool,
@@ -112,6 +119,8 @@ struct Window {
     panel: Panel,
     controls: Vec<HWND>,
     devices: Vec<(u32, String)>,
+    model_catalog: Option<engines::ModelCatalog>,
+    model_catalog_request: u64,
     status: String,
     auxiliary_busy: bool,
     taskbar_created: u32,
@@ -276,10 +285,14 @@ pub fn run() -> Result<(), String> {
             updates: updates.clone(),
             events,
             stop: None,
+            cancel_after_start: false,
+            escape_down: false,
+            clipboard_notice: None,
             unsaved: None,
             retry_transcription: None,
             starting: false,
             stop_after_start: false,
+            startup_stop: None,
             working: false,
             saving_audio: false,
             exiting: false,
@@ -299,6 +312,8 @@ pub fn run() -> Result<(), String> {
             panel: Panel::History,
             controls: Vec::new(),
             devices: Vec::new(),
+            model_catalog: None,
+            model_catalog_request: 0,
             status,
             auxiliary_busy: false,
             taskbar_created: RegisterWindowMessageW(windows_sys::w!("TaskbarCreated")),
@@ -346,6 +361,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 if id == PROVIDER {
                     if w >> 16 == CBN_SELCHANGE as usize {
                         state.provider_changed();
+                    }
+                } else if matches!(id, ADDRESS | KEY) {
+                    if w >> 16 == EN_CHANGE as usize {
+                        state.clear_models();
                     }
                 } else if id == LIST {
                     if w >> 16 == LBN_SELCHANGE as usize {
@@ -421,7 +440,11 @@ unsafe extern "system" fn layer_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
             if message == WM_LBUTTONDOWN {
                 layer.pointer_down();
             } else if layer.pointer_update(true, is_overlay) {
-                state.layer_click();
+                if state.stop.is_some() && layer.cancel_hit() {
+                    state.cancel();
+                } else {
+                    state.layer_click();
+                }
             }
         });
         return 0;
@@ -520,6 +543,11 @@ impl Window {
     }
 
     fn layout(&mut self) {
+        self.model_catalog = None;
+        self.model_catalog_request += 1;
+        if self.status == LOADING_MODELS {
+            self.status = "就绪".into();
+        }
         for control in self.controls.drain(..) {
             unsafe {
                 DestroyWindow(control);
@@ -620,20 +648,39 @@ impl Window {
             &["外部 ASR", "火山引擎"],
             usize::from(volc),
         );
-        for (id, label, value, y) in [
-            (ADDRESS, "服务地址", remote.address, 100),
-            (MODEL, "模型 ID", remote.model, 136),
-            (KEY, "API Key", key, 172),
-        ] {
-            self.label(label, 14, y + 3, 110);
-            self.control(
-                id,
-                "EDIT",
-                &value,
-                (132, y, 510, 26),
-                WS_TABSTOP | (ES_AUTOHSCROLL | if id == KEY { ES_PASSWORD } else { 0 }) as u32,
-            );
-        }
+        self.label("服务地址", 14, 103, 110);
+        self.control(
+            ADDRESS,
+            "EDIT",
+            &remote.address,
+            (132, 100, 510, 26),
+            WS_TABSTOP | ES_AUTOHSCROLL as u32,
+        );
+        self.label("模型 ID", 14, 139, 110);
+        self.control(
+            MODEL,
+            "COMBOBOX",
+            "",
+            (132, 136, 390, 220),
+            WS_TABSTOP | WS_VSCROLL | (CBS_DROPDOWN | CBS_AUTOHSCROLL) as u32,
+        );
+        self.set(MODEL, &remote.model);
+        self.control(
+            FETCH_MODELS,
+            "BUTTON",
+            "获取模型",
+            (532, 136, 110, 26),
+            WS_TABSTOP,
+        );
+        self.enable_model_fetch(!volc);
+        self.label("API Key", 14, 175, 110);
+        self.control(
+            KEY,
+            "EDIT",
+            &key,
+            (132, 172, 510, 26),
+            WS_TABSTOP | (ES_AUTOHSCROLL | ES_PASSWORD) as u32,
+        );
         self.combo(DEVICE, "麦克风", 212, &["系统默认"], 0);
         self.fill_devices();
         let language = LANGUAGES
@@ -685,7 +732,7 @@ impl Window {
             usize::from(self.config.desktop.windows_floating_button),
             0,
         );
-        self.button(DETECT, "自动探测并保存", 14, 405, 150);
+        self.button(DETECT, "保存识别服务", 14, 405, 150);
         self.button(CHECK, "测试连接", 174, 405, 108);
         self.button(PREFERENCES, "保存偏好", 292, 405, 114);
     }
@@ -750,6 +797,7 @@ impl Window {
         }
         self.panel = Panel::Settings;
         self.layout();
+        self.fetch_models(false);
         let updates = self.updates.clone();
         thread::spawn(move || updates.send(Event::Devices(AudioRecorder::get_devices())));
     }
@@ -831,13 +879,90 @@ impl Window {
         }
     }
 
-    fn provider_changed(&self) {
-        let key = if self.send(PROVIDER, CB_GETCURSEL, 0, 0) == 1 {
+    fn is_volc(&self) -> bool {
+        self.send(PROVIDER, CB_GETCURSEL, 0, 0) == 1
+    }
+
+    fn provider_changed(&mut self) {
+        let key = if self.is_volc() {
             &self.config.engine.volc_bigmodel.api_key
         } else {
             &self.config.engine.remote.api_key
         };
         self.set(KEY, key);
+        self.clear_models();
+        self.fetch_models(false);
+    }
+
+    fn enable_model_fetch(&self, enabled: bool) {
+        unsafe { EnableWindow(self.child(FETCH_MODELS), i32::from(enabled)) };
+    }
+
+    fn fill_models(&self, models: &[String]) {
+        let value = self.text(MODEL);
+        self.send(MODEL, CB_RESETCONTENT, 0, 0);
+        for model in models {
+            self.send(MODEL, CB_ADDSTRING, 0, wide(model).as_ptr() as isize);
+        }
+        if let Some(index) = models.iter().position(|model| *model == value) {
+            self.send(MODEL, CB_SETCURSEL, index, 0);
+        } else {
+            self.set(MODEL, &value);
+        }
+    }
+
+    fn clear_models(&mut self) {
+        self.model_catalog_request += 1;
+        self.model_catalog = None;
+        self.fill_models(&[]);
+        self.enable_model_fetch(!self.is_volc());
+        if self.status == LOADING_MODELS {
+            self.status("服务设置已修改，可重新获取模型。");
+        }
+    }
+
+    fn service_key(&mut self, address: &str, volc: bool, announce: bool) -> Option<String> {
+        let key = self.text(KEY).trim().to_owned();
+        if !volc
+            && address != self.config.engine.remote.address
+            && !key.is_empty()
+            && key == self.config.engine.remote.api_key
+        {
+            if announce {
+                self.set(KEY, "");
+                self.clear_models();
+                self.status("服务地址已改变，请填写该服务的密钥。");
+            }
+            return None;
+        }
+        Some(key)
+    }
+
+    fn fetch_models(&mut self, announce: bool) {
+        if self.panel != Panel::Settings || self.is_volc() || self.auxiliary_busy {
+            return;
+        }
+        let address = self.text(ADDRESS).trim().to_owned();
+        if address.is_empty() {
+            if announce {
+                self.status("请先填写服务地址。");
+            }
+            return;
+        }
+        let Some(key) = self.service_key(&address, false, announce) else {
+            return;
+        };
+        self.model_catalog_request += 1;
+        let request = self.model_catalog_request;
+        self.enable_model_fetch(false);
+        if announce {
+            self.status(LOADING_MODELS);
+        }
+        let updates = self.updates.clone();
+        thread::spawn(move || {
+            let result = engines::list_models(&address, &key);
+            updates.send(Event::ModelCatalog(request, announce, result));
+        });
     }
 
     fn check_service(&mut self, save: bool) {
@@ -846,18 +971,25 @@ impl Window {
         }
         let address = self.text(ADDRESS).trim().to_owned();
         let model = self.text(MODEL).trim().to_owned();
-        let key = self.text(KEY).trim().to_owned();
-        let volc = self.send(PROVIDER, CB_GETCURSEL, 0, 0) == 1;
-        let mut config = self.config.clone();
-        if !volc
-            && address != config.engine.remote.address
-            && !key.is_empty()
-            && key == config.engine.remote.api_key
-        {
-            self.set(KEY, "");
-            self.status("服务地址已改变，请重新填写该服务的密钥。");
+        let volc = self.is_volc();
+        let Some(key) = self.service_key(&address, volc, true) else {
             return;
-        }
+        };
+        let catalog_endpoint = if volc {
+            None
+        } else if let Some(catalog) = &self.model_catalog {
+            if model.is_empty() && catalog.models.len() > 1 {
+                self.status("请从下拉框选择要使用的模型。");
+                return;
+            }
+            catalog
+                .models
+                .contains(&model)
+                .then(|| catalog.endpoint.clone())
+        } else {
+            None
+        };
+        let mut config = self.config.clone();
         let updates = self.updates.clone();
         self.auxiliary_busy = true;
         self.status("正在检测识别服务…");
@@ -877,7 +1009,19 @@ impl Window {
                 {
                     engines::check_service(&config.engine.remote)?
                 } else {
-                    let (service, text) = engines::detect_service(&address, &model, &key)?;
+                    let (service, text) = if let Some(endpoint) = catalog_endpoint {
+                        let service = RemoteService {
+                            address,
+                            endpoint,
+                            protocol: engines::Protocol::OpenAI,
+                            model,
+                            api_key: key,
+                        };
+                        let text = engines::check_service(&service)?;
+                        (service, text)
+                    } else {
+                        engines::detect_service(&address, &model, &key)?
+                    };
                     config.engine.current = "remote".into();
                     config.engine.remote = service;
                     text
@@ -952,6 +1096,7 @@ impl Window {
                 self.layout();
             }
             DETECT => self.check_service(true),
+            FETCH_MODELS => self.fetch_models(true),
             CHECK => self.check_service(false),
             PREFERENCES => self.save_preferences(),
             SAVE_TERMS => self.save_terms(),
@@ -1064,13 +1209,16 @@ impl Window {
             return;
         }
         if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+            let _ = stop.send(app::StopRequest::new(false));
             self.working = true;
             self.saving_audio = true;
             self.overlay.take();
             self.status("正在保存录音…");
         } else if self.starting {
             self.stop_after_start = true;
+            if self.startup_stop.is_none() {
+                self.startup_stop = Some(app::StopRequest::during_startup());
+            }
         } else if let Some(pending) = self.unsaved.take() {
             self.working = true;
             self.saving_audio = true;
@@ -1094,11 +1242,34 @@ impl Window {
     fn update(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
+                Event::ClipboardNotice => {
+                    if let Some(graphics) = &self.graphics {
+                        if let Ok(layer) =
+                            Layer::new(self.hwnd, graphics, 470, 70, "win7-clipboard-position")
+                        {
+                            self.clipboard_notice = Some((layer, Instant::now()));
+                        }
+                    }
+                }
                 Event::Started(stop) => {
                     self.starting = false;
                     self.stop = Some(stop);
+                    self.escape_down = speaky_core::hotkey::escape_pressed();
                     if std::mem::take(&mut self.stop_after_start) {
-                        self.toggle(false, None);
+                        if std::mem::take(&mut self.cancel_after_start) {
+                            self.cancel();
+                        } else {
+                            if let Some(stop) = self.stop.take() {
+                                let request = self
+                                    .startup_stop
+                                    .take()
+                                    .unwrap_or_else(|| app::StopRequest::new(false));
+                                let _ = stop.send(request);
+                                self.working = true;
+                                self.saving_audio = true;
+                                self.status("正在保存录音…");
+                            }
+                        }
                     } else {
                         self.status("录音中…");
                         if let Some(graphics) = &self.graphics {
@@ -1135,6 +1306,7 @@ impl Window {
                     self.saving_audio = false;
                     self.starting = false;
                     self.stop_after_start = false;
+                    self.startup_stop = None;
                     self.working = false;
                     self.selected = 0;
                     self.rows = rows;
@@ -1177,6 +1349,7 @@ impl Window {
                             self.config = config;
                             if self.panel == Panel::Settings {
                                 self.layout();
+                                self.fetch_models(false);
                             }
                             self.status(message);
                         }
@@ -1186,6 +1359,23 @@ impl Window {
                 Event::Aux(message) => {
                     self.auxiliary_busy = false;
                     self.status(message);
+                }
+                Event::ModelCatalog(request, announce, result) => {
+                    if self.panel != Panel::Settings || request != self.model_catalog_request {
+                        continue;
+                    }
+                    self.enable_model_fetch(true);
+                    let message = match result {
+                        Ok(catalog) => {
+                            self.fill_models(&catalog.models);
+                            self.model_catalog = Some(catalog);
+                            "请选择模型，然后测试连接或保存。".into()
+                        }
+                        Err(error) => error,
+                    };
+                    if announce && self.status == LOADING_MODELS {
+                        self.status(message);
+                    }
                 }
                 Event::Devices(devices) => {
                     self.devices = devices;
@@ -1251,7 +1441,33 @@ impl Window {
         self.toggle(true, None);
     }
 
+    fn cancel(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(app::StopRequest::new(true));
+            self.working = true;
+            self.saving_audio = true;
+            self.overlay.take();
+            self.caption.clear();
+            self.status("已取消转写，正在保存录音…");
+        } else if self.starting {
+            self.stop_after_start = true;
+            self.cancel_after_start = true;
+        }
+    }
+
     fn timer(&mut self) {
+        let down = speaky_core::hotkey::escape_pressed();
+        if down && !self.escape_down && (self.stop.is_some() || self.starting) {
+            self.cancel();
+        }
+        self.escape_down = down;
+        if self
+            .clipboard_notice
+            .as_ref()
+            .is_some_and(|(_, since)| since.elapsed().as_secs() >= 8)
+        {
+            self.clipboard_notice.take();
+        }
         let overlay_click = self
             .overlay
             .as_mut()
@@ -1261,7 +1477,14 @@ impl Window {
             .as_mut()
             .is_some_and(|layer| layer.pointer_update(false, false));
         if overlay_click || floating_click {
-            self.layer_click();
+            let cancel = self.stop.is_some()
+                && ((overlay_click && self.overlay.as_ref().is_some_and(|o| o.layer.cancel_hit()))
+                    || (floating_click && self.floating.as_ref().is_some_and(Layer::cancel_hit)));
+            if cancel {
+                self.cancel();
+            } else {
+                self.layer_click();
+            }
         }
         let presses = self.hotkey.as_mut().map_or(0, |(_, events)| {
             let mut count = 0;
@@ -1293,6 +1516,17 @@ impl Window {
             return;
         };
         let mut period = if self.stop.is_some() { 16 } else { 32 };
+        if let Some((layer, _)) = &mut self.clipboard_notice {
+            let _ = layer.surface.draw(layer.hwnd, |target| {
+                d2d::fill(target, d2d::rect(0., 0., 470., 70.), 16., 0x25334a, 0.96)?;
+                graphics.text(
+                    target,
+                    "语音识别内容已保存到剪贴板，请手动粘贴",
+                    d2d::rect(18., 22., 458., 58.),
+                )
+            });
+            layer.show(true);
+        }
         if let Some(overlay) = &mut self.overlay {
             match overlay.render(graphics, self.activity, self.elapsed, &self.caption) {
                 Ok(rate) => {

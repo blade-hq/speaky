@@ -1,8 +1,15 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod benchmark;
+#[cfg(windows)]
+mod benchmark_ui;
+mod clipboard_notice;
 mod correction_ui;
+mod diagnostics;
 #[cfg(windows)]
 mod floating_control;
+mod header_wave;
 #[cfg(windows)]
 mod hotkey_capture;
 mod icons;
@@ -32,14 +39,14 @@ use gpui::{
 };
 use icons::Icon;
 use onboarding::{Anchor, Step};
-#[cfg(windows)]
-use speaky_core::dictation_target;
 use speaky_core::{
-    audio, config, drafts, engines, history, hotkey, model_packs, playback, polish,
+    audio, config, drafts, engines, history, hotkey, model_packs, pipeline, playback, polish,
     polish_benchmark, polish_preferences,
     session::{is_silent_recording, LivePreview, SILENT_INPUT},
     terms,
 };
+#[cfg(windows)]
+use speaky_core::{dictation_target, local_models};
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -63,6 +70,8 @@ enum Page {
     History,
     Terms,
     Settings,
+    #[cfg(windows)]
+    Benchmark,
 }
 
 gpui::actions!(
@@ -74,13 +83,14 @@ gpui::actions!(
 embed_plist::embed_info_plist!("../Info.plist");
 
 struct Recording {
-    recorder: audio::AudioRecorder,
+    recorder: speaky_core::session::DurableRecorder,
     draft: PathBuf,
     destination: RecordingDestination,
     preview_enabled: bool,
     preview_pending: Option<uuid::Uuid>,
     preview: LivePreview,
     generation: uuid::Uuid,
+    escape_down: bool,
     #[cfg(windows)]
     delivery_issue: Option<String>,
 }
@@ -121,6 +131,14 @@ struct PendingSave {
 
 struct Speaky {
     recording: Option<Recording>,
+    starting: bool,
+    stop_after_start: Option<bool>,
+    #[cfg(windows)]
+    startup_target: Option<Result<dictation_target::DictationTarget, String>>,
+    #[cfg(target_os = "macos")]
+    mac_delivery: Option<Result<Option<mac_dictation::Target>, String>>,
+    #[cfg(target_os = "macos")]
+    mac_delivery_generation: uuid::Uuid,
     global_hotkey: Option<hotkey::GlobalHotkey>,
     hotkey_status: String,
     #[cfg(target_os = "macos")]
@@ -130,9 +148,12 @@ struct Speaky {
     correction: correction_ui::CorrectionEditor,
     transcribing: bool,
     transcript_scroll: ScrollHandle,
+    header_wave: gpui::Entity<header_wave::HeaderWave>,
     page: Page,
     tour: onboarding::Tour,
     model_picker: model_picker::ModelPicker,
+    #[cfg(windows)]
+    benchmark: benchmark_ui::BenchmarkPage,
     archive: Vec<drafts::Entry>,
     saved_recording: Option<PathBuf>,
     unsaved: Option<PendingSave>,
@@ -149,6 +170,7 @@ struct Speaky {
     organizer_enabled: bool,
     organizer_learning: bool,
     organizer: polish_ui::Organizer,
+    diagnostics: diagnostics::Diagnostics,
 }
 
 impl Speaky {
@@ -167,6 +189,14 @@ impl Speaky {
         let archive = drafts::list();
         Self {
             recording: None,
+            starting: false,
+            stop_after_start: None,
+            #[cfg(windows)]
+            startup_target: None,
+            #[cfg(target_os = "macos")]
+            mac_delivery: None,
+            #[cfg(target_os = "macos")]
+            mac_delivery_generation: uuid::Uuid::new_v4(),
             global_hotkey: hotkey,
             hotkey_status,
             #[cfg(target_os = "macos")]
@@ -176,9 +206,12 @@ impl Speaky {
             correction: correction_ui::CorrectionEditor::default(),
             transcribing: false,
             transcript_scroll: ScrollHandle::new(),
+            header_wave: cx.new(|_| header_wave::HeaderWave::default()),
             page: Page::Home,
             tour: onboarding::Tour::load(cx),
             model_picker,
+            #[cfg(windows)]
+            benchmark: benchmark_ui::BenchmarkPage::default(),
             archive,
             saved_recording: None,
             unsaved: None,
@@ -194,11 +227,12 @@ impl Speaky {
             organizer_enabled: organizer.enabled,
             organizer_learning: organizer.learns_preferences(),
             organizer: polish_ui::Organizer::default(),
+            diagnostics: diagnostics::Diagnostics::default(),
         }
     }
 
     fn toggle_recording(&mut self, source: RecordingStart, cx: &mut Context<Self>) {
-        if self.recording.is_some() {
+        if self.recording.is_some() || self.starting {
             self.stop_recording(cx);
         } else {
             self.begin_recording(drafts::new_path(), source, cx);
@@ -206,19 +240,84 @@ impl Speaky {
     }
 
     fn recognition_model_busy(&self) -> bool {
+        if self.starting {
+            return true;
+        }
         if self.correction.busy {
+            return true;
+        }
+        #[cfg(windows)]
+        if self.benchmark.is_running() {
             return true;
         }
         self.local_model_switching()
     }
 
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        self.finish_recording(false, cx);
+    }
+
+    fn cancel_recording(&mut self, cx: &mut Context<Self>) {
+        self.finish_recording(true, cx);
+    }
+
+    fn finish_recording(&mut self, cancelled: bool, cx: &mut Context<Self>) {
+        if self.starting {
+            self.stop_after_start = Some(cancelled);
+            #[cfg(windows)]
+            {
+                if !cancelled {
+                    self.startup_target =
+                        Some(dictation_target::DictationTarget::capture_at_stop(None));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                self.mac_delivery = Some(mac_dictation::Target::capture());
+            }
+            self.status = "麦克风准备后将停止并保存。".into();
+            cx.notify();
+            return;
+        }
         let Some(mut recording) = self.recording.take() else {
             return;
         };
         #[cfg(windows)]
-        if let RecordingDestination::External(Some(target)) = &recording.destination {
-            target.stop_preview();
+        if let RecordingDestination::External(previous) = &recording.destination {
+            if cancelled {
+                if let Some(target) = previous.clone() {
+                    let task = cx.background_spawn(async move { target.cancel_preview() });
+                    cx.spawn(async move |entity, cx| {
+                        if let Err(error) = task.await {
+                            let _ = entity.update(cx, |view, cx| {
+                                view.status = format!("录音已保留。{error}");
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                }
+            } else {
+                recording.destination = RecordingDestination::External(
+                    self.startup_target
+                        .take()
+                        .unwrap_or_else(|| {
+                            dictation_target::DictationTarget::capture_at_stop(previous.as_ref())
+                        })
+                        .ok(),
+                );
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if !cancelled
+            && self.mac_delivery.is_none()
+            && matches!(recording.destination, RecordingDestination::MacExternal)
+        {
+            self.mac_delivery = Some(mac_dictation::Target::capture());
+        }
+        if cancelled {
+            recording.destination = RecordingDestination::Archive;
+            self.finalizing_preview.clear();
         }
         self.close_overlay(cx);
         let audio = recording.recorder.stop();
@@ -232,9 +331,10 @@ impl Speaky {
                 self.floating_retry = true;
             }
         } else {
-            let transcribe_after_save = recording.preview_enabled
-                || !matches!(recording.destination, RecordingDestination::Archive);
-            if recording.preview_enabled {
+            let transcribe_after_save = !cancelled
+                && (recording.preview_enabled
+                    || !matches!(recording.destination, RecordingDestination::Archive));
+            if recording.preview_enabled && !cancelled {
                 self.finalizing_preview = recording.preview.text;
             }
             self.persist(
@@ -246,6 +346,9 @@ impl Speaky {
                 },
                 cx,
             );
+            if cancelled && self.unsaved.is_none() {
+                self.status = "已取消转写，原始录音已保存在历史中。".into();
+            }
         }
         cx.notify();
     }
@@ -289,6 +392,10 @@ impl Speaky {
         {
             return;
         }
+        #[cfg(target_os = "macos")]
+        {
+            self.mac_delivery_generation = uuid::Uuid::new_v4();
+        }
         self.model_picker.close();
         // Capture the editor for live previews while the microphone opens.
         #[cfg(windows)]
@@ -310,65 +417,80 @@ impl Speaky {
         };
         #[cfg(not(any(windows, target_os = "macos")))]
         let destination = RecordingDestination::Archive;
-        let result = (|| {
-            let config = config::Config::load().map_err(|error| error.to_string())?;
-            let preview_enabled = true;
-            let asr = config.core.asr;
-            let mut recorder = audio::AudioRecorder::new_with_name(
-                asr.audio_device,
-                asr.audio_device_name.as_deref(),
-                asr.audio_gain,
-            )?;
-            let mut preview_cursor = 0;
-            if source == RecordingStart::Resume {
-                let wav = std::fs::read(&draft).map_err(|error| error.to_string())?;
-                recorder.resume_wav(&wav)?;
-                preview_cursor = (wav.len() - 44) / 2;
-            } else {
-                recorder.start()?;
-            }
-            Ok::<_, String>((recorder, preview_cursor, preview_enabled))
-        })();
-        match result {
-            Ok((recorder, preview_cursor, preview_enabled)) => {
-                self.tour.record_issue = false;
-                if self.tour.at(Step::Record) {
-                    self.tour.request_reveal();
-                }
-                self.close_overlay(cx);
-                self.stop_playback();
-                self.finalizing_preview.clear();
-                self.transcript_scroll.set_offset(point(px(0.), px(0.)));
-                self.recording = Some(Recording {
-                    recorder,
-                    draft,
-                    destination,
-                    preview_enabled,
-                    preview_pending: None,
-                    preview: LivePreview::new(preview_cursor),
-                    generation: uuid::Uuid::new_v4(),
-                    #[cfg(windows)]
-                    delivery_issue: None,
-                });
-                self.status.clear();
-                #[cfg(windows)]
-                {
-                    self.floating_retry = false;
-                }
-                self.show_recording_overlay(cx);
-            }
-            Err(error) => {
-                self.status = error;
-                if self.tour.at(Step::Record) {
-                    self.tour.record_issue = true;
-                }
-                #[cfg(windows)]
-                {
-                    self.floating_retry = true;
-                }
-            }
+        self.starting = true;
+        self.stop_after_start = None;
+        #[cfg(windows)]
+        {
+            self.startup_target = None;
         }
+        #[cfg(target_os = "macos")]
+        {
+            self.mac_delivery = None;
+        }
+        self.status = "正在打开麦克风…".into();
         cx.notify();
+        let opening_draft = draft.clone();
+        let task = cx.background_spawn(async move {
+            let config = config::Config::load().map_err(|error| error.to_string())?;
+            speaky_core::session::open_recording(
+                &config,
+                &opening_draft,
+                source == RecordingStart::Resume,
+            )
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, move |view, cx| {
+                view.starting = false;
+                match result {
+                    Ok((recorder, preview)) => {
+                        view.tour.record_issue = false;
+                        if view.tour.at(Step::Record) {
+                            view.tour.request_reveal();
+                        }
+                        view.close_overlay(cx);
+                        view.stop_playback();
+                        view.finalizing_preview.clear();
+                        view.transcript_scroll.set_offset(point(px(0.), px(0.)));
+                        view.recording = Some(Recording {
+                            recorder,
+                            draft,
+                            destination,
+                            preview_enabled: true,
+                            preview_pending: None,
+                            preview,
+                            generation: uuid::Uuid::new_v4(),
+                            escape_down: hotkey::escape_pressed(),
+                            #[cfg(windows)]
+                            delivery_issue: None,
+                        });
+                        view.status.clear();
+                        #[cfg(windows)]
+                        {
+                            view.floating_retry = false;
+                        }
+                        if let Some(cancelled) = view.stop_after_start.take() {
+                            view.finish_recording(cancelled, cx);
+                        } else {
+                            view.show_recording_overlay(cx);
+                        }
+                    }
+                    Err(error) => {
+                        view.status = error;
+                        view.stop_after_start = None;
+                        if view.tour.at(Step::Record) {
+                            view.tour.record_issue = true;
+                        }
+                        #[cfg(windows)]
+                        {
+                            view.floating_retry = true;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn show_recording_overlay(&mut self, cx: &mut Context<Self>) {
@@ -383,12 +505,16 @@ impl Speaky {
             return;
         }
         let finish = cx.weak_entity();
+        let cancel = cx.weak_entity();
         match overlay::RecordingOverlay::open(
             cx,
             show_controls,
             recording.preview_enabled,
             move |cx| {
                 let _ = finish.update(cx, Speaky::stop_recording);
+            },
+            move |cx| {
+                let _ = cancel.update(cx, Speaky::cancel_recording);
             },
         ) {
             Ok(overlay) => self.overlay = Some(overlay),
@@ -404,11 +530,18 @@ impl Speaky {
     ) -> Result<(), String> {
         if enabled && self.floating.is_none() {
             let app = cx.weak_entity();
-            let handle = floating_control::FloatingControl::open(cx, move |cx| {
-                let _ = app.update(cx, |view, cx| {
-                    view.toggle_recording(RecordingStart::Desktop, cx)
-                });
-            })?;
+            let cancel = cx.weak_entity();
+            let handle = floating_control::FloatingControl::open(
+                cx,
+                move |cx| {
+                    let _ = app.update(cx, |view, cx| {
+                        view.toggle_recording(RecordingStart::Desktop, cx)
+                    });
+                },
+                move |cx| {
+                    let _ = cancel.update(cx, Speaky::cancel_recording);
+                },
+            )?;
             self.floating = Some(handle);
             self.close_overlay(cx);
             self.show_recording_overlay(cx);
@@ -435,12 +568,16 @@ impl Speaky {
                 recording.recorder.get_audio_level(),
             )
         } else {
-            let state = if self.transcribing {
+            let state = if self.starting {
+                State::Busy("正在打开麦克风…")
+            } else if self.transcribing {
                 State::Transcribing
             } else if self.unsaved.is_some() {
                 State::Busy("待保存录音")
             } else if self.correction.busy {
                 State::Busy("保存修改中")
+            } else if self.benchmark.is_running() {
+                State::Busy("模型评测中")
             } else if self.local_model_switching() {
                 State::Busy("切换模型中")
             } else if self.floating_retry {
@@ -460,6 +597,12 @@ impl Speaky {
     }
 
     fn save_before_exit(&mut self, cx: &mut Context<Self>) {
+        if self.starting {
+            self.stop_after_start = Some(true);
+            self.status = "正在打开麦克风，停止并保存后即可退出。".into();
+            cx.notify();
+            return;
+        }
         if let Some(recording) = &mut self.recording {
             #[cfg(windows)]
             if let RecordingDestination::External(Some(target)) = &recording.destination {
@@ -477,6 +620,10 @@ impl Speaky {
 
     fn stop_playback(&mut self) {
         self.playback = None;
+        #[cfg(windows)]
+        {
+            self.benchmark.playing = false;
+        }
     }
 
     fn checkpoint(&mut self, cx: &mut Context<Self>) {
@@ -489,6 +636,19 @@ impl Speaky {
     }
 
     fn poll_preview(&mut self, cx: &mut Context<Self>) {
+        if self.starting && hotkey::escape_pressed() {
+            self.cancel_recording(cx);
+            return;
+        }
+        if let Some(recording) = &mut self.recording {
+            let down = hotkey::escape_pressed();
+            let cancel = down && !recording.escape_down;
+            recording.escape_down = down;
+            if cancel {
+                self.cancel_recording(cx);
+                return;
+            }
+        }
         let Some(recording) = &mut self.recording else {
             return;
         };
@@ -680,6 +840,11 @@ impl Speaky {
         {
             return;
         }
+        #[cfg(target_os = "macos")]
+        let mac_delivery_generation = {
+            self.mac_delivery_generation = uuid::Uuid::new_v4();
+            self.mac_delivery_generation
+        };
         self.model_picker.close();
         self.transcribing = true;
         self.stop_playback();
@@ -691,45 +856,26 @@ impl Speaky {
         #[cfg(target_os = "macos")]
         let mac_external = matches!(destination, RecordingDestination::MacExternal);
         let task = cx.background_spawn(async move {
-            let audio = std::fs::read(&draft).map_err(|error| error.to_string())?;
-            if is_silent_recording(&audio) {
-                return Err(SILENT_INPUT.to_owned());
-            }
-            let transcribe = || {
-                let config = config::Config::load().map_err(|error| error.to_string())?;
-                let engine = engines::recognition_engine(&config)?;
-                let text = terms::transcribe(
-                    engine.as_ref(),
-                    &audio,
-                    &config.core.asr.language,
-                    engines::TranscriptionPass::Final,
-                )
-                .map_err(|error| error.to_string())?;
-                if text.trim().is_empty() {
-                    return Err("未识别到文字。".to_owned());
-                }
-                history::record(&draft, &text, engine.name())
-                    .map_err(|error| format!("保存转写结果失败：{error}"))?;
-                #[cfg(not(target_os = "macos"))]
-                let status = match destination {
-                    RecordingDestination::Archive => String::new(),
-                    #[cfg(windows)]
-                    RecordingDestination::External(target) => {
-                        match dictation_target::DictationTarget::deliver_final(
-                            target.as_ref(),
-                            &text,
-                        ) {
-                            Ok(true) => "已输入到当前输入框。".into(),
-                            Ok(false) => String::new(),
-                            Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
-                        }
+            let config = config::Config::load().map_err(|error| error.to_string())?;
+            let transcript = pipeline::transcribe_saved(&config, &draft)
+                .map_err(|error| format!("{error}\n录音已保存至 {}", draft.display()))?;
+            let text = transcript.text;
+            let mut status = transcript.notice;
+            let mut fallback = false;
+            #[cfg(windows)]
+            if let RecordingDestination::External(target) = destination {
+                match target
+                    .ok_or_else(|| "停止时未找到可写的输入框。".to_owned())
+                    .and_then(|target| target.deliver(&text))
+                {
+                    Ok(()) => status.push_str(" 已输入到停止时的输入框。"),
+                    Err(error) => {
+                        status.push_str(&format!(" {error}"));
+                        fallback = true;
                     }
-                };
-                #[cfg(target_os = "macos")]
-                let status = String::new();
-                Ok((text, status))
-            };
-            transcribe().map_err(|error| format!("{error}\n录音已保存至 {}", draft.display()))
+                }
+            }
+            Ok::<_, String>((text, status, fallback))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
@@ -737,33 +883,104 @@ impl Speaky {
                 view.transcribing = false;
                 view.archive = drafts::list();
                 match result {
-                    Ok((text, status)) => {
+                    Ok((text, mut status, fallback)) => {
+                        #[cfg(target_os = "macos")]
+                        let mut fallback = fallback;
                         view.finalizing_preview.clear();
                         if view.saved_recording.as_ref() == Some(&completed_draft) {
                             view.saved_recording = None;
                         }
                         view.transcript_scroll.set_offset(point(px(0.), px(0.)));
                         #[cfg(target_os = "macos")]
-                        let status = if mac_external {
-                            // Dictation follows the editor focused when the transcript is ready.
-                            match mac_dictation::Target::capture() {
-                                Ok(Some(target)) => match target.insert(&text, cx) {
-                                    Ok(notice) => notice.into(),
-                                    Err(error) => {
-                                        format!("{error} 转写已保存，可在听写或历史中复制。")
+                        if mac_external {
+                            match view
+                                .mac_delivery
+                                .take()
+                                .unwrap_or_else(|| Err("未找到停止时的输入框。".into()))
+                            {
+                                Ok(Some(target)) => {
+                                    match target.insert(&text, mac_delivery_generation, cx) {
+                                        Ok(notice) => status.push_str(notice),
+                                        Err(error) => {
+                                            status.push_str(&error);
+                                            fallback = true;
+                                        }
                                     }
-                                },
-                                Ok(None) => status,
-                                Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
+                                }
+                                Ok(None) => fallback = true,
+                                Err(error) => {
+                                    status.push_str(&error);
+                                    fallback = true;
+                                }
                             }
-                        } else {
-                            status
-                        };
+                        }
+                        if fallback {
+                            view.clipboard_fallback(&text, cx);
+                            status.push_str(&view.status);
+                        }
                         view.result = Some((history::Target::Draft(completed_draft), text));
                         view.status = status;
                     }
                     Err(error) => view.status = error,
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn clipboard_fallback(&mut self, text: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        self.status = clipboard_notice::MESSAGE.into();
+        if let Err(error) = clipboard_notice::show(cx) {
+            self.status.push_str(&format!("（{error}）"));
+        }
+    }
+
+    fn compare_recording(&mut self, draft: PathBuf, cx: &mut Context<Self>) {
+        if self.recording.is_some()
+            || self.transcribing
+            || self.unsaved.is_some()
+            || self.recognition_model_busy()
+        {
+            return;
+        }
+        self.model_picker.close();
+        self.transcribing = true;
+        self.stop_playback();
+        self.status = "正在用所选模型测试这段录音…".into();
+        let task = cx.background_spawn(async move {
+            let audio = std::fs::read(&draft).map_err(|error| error.to_string())?;
+            if is_silent_recording(&audio) {
+                return Err(SILENT_INPUT.to_owned());
+            }
+            let config = config::Config::load().map_err(|error| error.to_string())?;
+            let engine = engines::recognition_engine(&config)?;
+            let model = engine.name().to_owned();
+            let text = terms::transcribe(
+                engine.as_ref(),
+                &audio,
+                &config.core.asr.language,
+                engines::TranscriptionPass::Final,
+            )
+            .map_err(|error| error.to_string())?;
+            if text.trim().is_empty() {
+                return Err("未识别到文字。".to_owned());
+            }
+            drafts::save_comparison(&draft, &model, &text)
+                .map_err(|error| format!("保存模型测试结果失败：{error}"))?;
+            Ok::<_, String>(model)
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |view, cx| {
+                view.transcribing = false;
+                view.archive = drafts::list();
+                view.status = match result {
+                    Ok(model) => format!("{model} 的测试结果已显示在录音下方。"),
+                    Err(error) => format!("模型测试失败：{error}"),
+                };
                 cx.notify();
             });
         })
@@ -951,6 +1168,11 @@ impl Speaky {
         let selected = self.page == Page::Settings;
         icon_button(Icon::Settings, "设置")
             .size(px(36.))
+            .w_full()
+            .justify_start()
+            .px_2()
+            .gap_2()
+            .child("设置")
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(if selected { SELECTION } else { SURFACE }))
@@ -1116,7 +1338,8 @@ impl Speaky {
             .flex()
             .flex_col()
             .gap_4()
-            .child(controls);
+            .child(controls)
+            .child(self.input_status(cx));
         #[cfg(windows)]
         let workspace = workspace.when_some(
             self.recording
@@ -1257,14 +1480,7 @@ impl Speaky {
                         "录下语音、查看转写，也能把文字写入其他应用。",
                     ))
                     .children(self.tour.mark(Anchor::Workspace))
-                    .when(wide, |header| {
-                        header.child(
-                            div()
-                                .w(px(174.))
-                                .flex_none()
-                                .child(studio_ui::signal(40., 0.81)),
-                        )
-                    }),
+                    .when(wide, |header| header.child(self.header_wave.clone())),
             )
             .child(
                 div()
@@ -1289,6 +1505,13 @@ impl Speaky {
                 Icon::Terms,
                 "个人词库",
                 "补充人名、项目名和常用写法。",
+            ),
+            #[cfg(windows)]
+            (
+                Page::Benchmark,
+                Icon::Benchmark,
+                "模型评测",
+                "用测试样本比较识别效果。",
             ),
             (
                 Page::Settings,
@@ -1347,7 +1570,10 @@ impl Speaky {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(page_heading("录音历史", "回听原音、编辑和复制转写。"))
+                    .child(page_heading(
+                        "录音历史",
+                        "回听原音、编辑转写，或用其他模型重新识别。",
+                    ))
                     .child(self.model_picker_button(cx)),
             )
             .children(self.model_picker_panel(cx))
@@ -1437,7 +1663,20 @@ impl Speaky {
                                         })
                                         .when_some(text.as_deref(), |body, source| {
                                             body.child(self.organized_result(entry, source, cx))
-                                        }),
+                                        })
+                                        .child(self.rewrite_debug(&entry.path, cx))
+                                        .children(entry.comparisons.iter().map(|comparison| {
+                                            div()
+                                                .mt_1()
+                                                .p_2()
+                                                .rounded_md()
+                                                .bg(rgb(SIDEBAR))
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(settings::detail(comparison.model.clone()))
+                                                .child(comparison.text.clone())
+                                        })),
                                 )
                                 .when_some(text.as_deref(), |row, source| {
                                     row.children(self.correction_button(
@@ -1446,6 +1685,19 @@ impl Speaky {
                                         source,
                                         cx,
                                     ))
+                                })
+                                .when(!self.recognition_model_busy(), |row| {
+                                    let compare = entry.path.clone();
+                                    row.child(
+                                        button("测试模型", false)
+                                            .id(("compare-recording", index))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |view, _, _, cx| {
+                                                    view.compare_recording(compare.clone(), cx);
+                                                }),
+                                            ),
+                                    )
                                 })
                                 .child(
                                     history_actions()
@@ -1739,6 +1991,8 @@ impl Render for Speaky {
             })
             .unwrap_or((status, status_color));
         let show_playback = self.playback.is_some();
+        #[cfg(windows)]
+        let show_playback = show_playback && !self.benchmark.playing;
         div()
             .size_full()
             .relative()
@@ -1779,6 +2033,8 @@ impl Render for Speaky {
                             (Page::Home, "工作台", Icon::Home),
                             (Page::History, "录音历史", Icon::History),
                             (Page::Terms, "词库", Icon::Terms),
+                            #[cfg(windows)]
+                            (Page::Benchmark, "模型评测", Icon::Benchmark),
                         ]
                         .map(|(page, label, icon)| self.nav_item(page, label, icon, cx)),
                     )
@@ -1791,7 +2047,7 @@ impl Render for Speaky {
                             .gap_1()
                             .mt_1()
                             .pt_2()
-                            .pr(px(14.))
+                            .flex_col()
                             .border_t_1()
                             .border_color(rgb(BORDER))
                             .child(self.tour_entry(cx).px_1())
@@ -1879,6 +2135,8 @@ impl Render for Speaky {
                             .child(match self.page {
                                 Page::Home => self.home(wide, cx),
                                 Page::History => self.history_page(cx),
+                                #[cfg(windows)]
+                                Page::Benchmark => self.benchmark_page(cx),
                                 Page::Terms => self.terms_page(wide, cx),
                                 Page::Settings => self.settings_page(cx),
                             }),
@@ -1890,7 +2148,11 @@ impl Render for Speaky {
             .when(self.tour.is_active(), |root| {
                 root.key_context("SpeakyGuide")
                     .on_action(cx.listener(|view, _: &DismissGuide, window, cx| {
-                        view.finish_tour(window, cx)
+                        if view.recording.is_some() || view.starting {
+                            view.cancel_recording(cx);
+                        } else {
+                            view.finish_tour(window, cx);
+                        }
                     }))
                     .children(self.tour_overlay(tour_docked, cx))
             })
@@ -1899,12 +2161,25 @@ impl Render for Speaky {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1030.), px(690.)), cx);
+        #[cfg(windows)]
+        let display_id = std::env::var_os("SPEAKY_START_ON_SECONDARY")
+            .filter(|value| value == "1")
+            .and_then(|_| cx.primary_display())
+            .and_then(|primary| {
+                cx.displays()
+                    .into_iter()
+                    .find(|display| display.id() != primary.id())
+                    .map(|display| display.id())
+            });
+        #[cfg(not(windows))]
+        let display_id = None;
+        let bounds = Bounds::centered(display_id, size(px(1030.), px(690.)), cx);
         let window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(665.), px(435.))),
+                    display_id,
                     window_background: if cfg!(windows) {
                         WindowBackgroundAppearance::Opaque
                     } else {
@@ -1927,6 +2202,10 @@ fn main() {
                     });
                     cx.new(|cx| {
                         let startup_config = config::Config::load();
+                        #[cfg(windows)]
+                        let release_gpu = startup_config.as_ref().ok().is_some_and(|c| {
+                            c.engine.current == "remote" || config::Framework::selected(c).is_some()
+                        }) && local_models::has_owned_manager();
                         let shortcut = startup_config
                             .as_ref()
                             .map(settings::selected_shortcut)
@@ -1966,6 +2245,17 @@ fn main() {
                             if entity
                                 .update(cx, |view, cx| {
                                     view.poll_preview(cx);
+                                    if view.diagnostics.checking {
+                                        cx.notify();
+                                    }
+                                    if view.page == Page::Home {
+                                        let level = view
+                                            .recording
+                                            .as_ref()
+                                            .map(|recording| recording.recorder.get_audio_level());
+                                        view.header_wave
+                                            .update(cx, |wave, _| wave.set_level(level));
+                                    }
                                     if let (Some(recording), Some(handle)) =
                                         (&view.recording, view.overlay)
                                     {
@@ -1999,6 +2289,12 @@ fn main() {
                         .detach();
                         let mut view = Speaky::new(hotkey, hotkey_status, cx);
                         view.show_first_tour(window, cx);
+                        #[cfg(any(target_os = "macos", windows))]
+                        view.resolve_framework_name(cx);
+                        #[cfg(windows)]
+                        if release_gpu {
+                            view.release_local_model(cx);
+                        }
                         if let Ok(config) = startup_config {
                             view.preload_selected_model(config, cx);
                         }
@@ -2041,7 +2337,7 @@ fn main() {
                 if view.unsaved.is_some() {
                     return false;
                 }
-                if view.transcribing || view.correction.busy {
+                if view.starting || view.transcribing || view.correction.busy {
                     view.status = "正在保存转写结果，完成后即可退出。".into();
                     cx.notify();
                     return false;

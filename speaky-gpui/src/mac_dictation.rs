@@ -6,6 +6,7 @@ use core_foundation::{
 };
 use core_graphics::event::{CGEvent, CGEventFlags};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use objc::{
     class, msg_send,
     rc::StrongPtr,
@@ -22,6 +23,8 @@ const FOCUS_CHANGED: &str = "输入焦点已改变。";
 const NO_EDITOR: &str = "转写完成时没有找到可编辑的输入框。";
 const ACCESSIBILITY: &str = "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 Speaky 写入输入框。";
 const AX_VALUE_CF_RANGE: u32 = 4;
+const AX_VALUE_CG_POINT: u32 = 1;
+const AX_VALUE_CG_SIZE: u32 = 2;
 const PASTE_FAILED: &str = "无法向原输入框粘贴转写。";
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -59,6 +62,42 @@ pub(super) fn request_access() {
             AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef());
         }
     }
+}
+
+/// The foreground window's frame uses Quartz coordinates (origin at the top left).
+pub(super) fn focused_window_bounds() -> Option<CGRect> {
+    if !has_access() {
+        return None;
+    }
+    let window = focused_window(frontmost_pid()?)?;
+    let position = attribute(&window, "AXPosition")?;
+    let size = attribute(&window, "AXSize")?;
+    let mut origin = CGPoint::new(0., 0.);
+    let mut dimensions = CGSize::new(0., 0.);
+    unsafe {
+        if position.type_of() != AXValueGetTypeID()
+            || size.type_of() != AXValueGetTypeID()
+            || AXValueGetValue(
+                position.as_CFTypeRef(),
+                AX_VALUE_CG_POINT,
+                (&mut origin as *mut CGPoint).cast(),
+            ) == 0
+            || AXValueGetValue(
+                size.as_CFTypeRef(),
+                AX_VALUE_CG_SIZE,
+                (&mut dimensions as *mut CGSize).cast(),
+            ) == 0
+        {
+            return None;
+        }
+    }
+    (origin.x.is_finite()
+        && origin.y.is_finite()
+        && dimensions.width.is_finite()
+        && dimensions.height.is_finite()
+        && dimensions.width > 0.
+        && dimensions.height > 0.)
+        .then(|| CGRect::new(&origin, &dimensions))
 }
 
 pub(super) struct Target {
@@ -142,6 +181,7 @@ impl Target {
     pub(super) fn insert(
         &self,
         text: &str,
+        generation: uuid::Uuid,
         cx: &mut gpui::Context<crate::Speaky>,
     ) -> Result<&'static str, String> {
         self.require_current()?;
@@ -177,25 +217,51 @@ impl Target {
         clipboard.restore_on_drop = false;
         down.post_to_pid(self.pid);
         up.post_to_pid(self.pid);
-        if let Some(expected) = expected {
-            let field = self.field.clone();
-            let executor = cx.background_executor().clone();
-            cx.spawn(async move |_, _| {
+        let field = self.field.clone();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |entity, cx| {
+            let mut confirmed = false;
+            if let Some(expected) = expected {
                 let deadline = Instant::now() + Duration::from_secs(2);
-                while clipboard.is_current() && Instant::now() < deadline {
+                while Instant::now() < deadline {
                     if attribute(&field, "AXValue")
                         .and_then(|value| value.downcast::<CFString>())
                         .is_some_and(|value| value.to_string() == expected)
                     {
                         clipboard.restore_on_drop = true;
+                        confirmed = true;
+                        break;
+                    }
+                    if !clipboard.is_current() {
                         break;
                     }
                     executor.timer(Duration::from_millis(100)).await;
                 }
-            })
-            .detach();
-        }
-        Ok("已发送粘贴，请核对输入框。无法确认写入时，转写会留在剪贴板。")
+            }
+            let clipboard_unchanged = clipboard.is_current();
+            drop(clipboard);
+            let _ = entity.update(cx, |view, cx| {
+                if view.mac_delivery_generation != generation {
+                    return;
+                }
+                if confirmed {
+                    view.status = "已输入到停止时的输入框。".into();
+                } else if clipboard_unchanged {
+                    // The transcript is already on the pasteboard. Rewriting it here
+                    // could race a copy the user makes after verification completes.
+                    view.status = crate::clipboard_notice::MESSAGE.into();
+                    if let Err(error) = crate::clipboard_notice::show(cx) {
+                        log::warn!("clipboard notice: {error}");
+                    }
+                } else {
+                    view.status =
+                        "剪贴板已更新，已保留新内容。转写结果保存在历史中，请从历史复制。".into();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        Ok("正在确认输入结果…")
     }
 
     fn expected_value(&self, transcript: &str) -> Option<String> {
@@ -266,6 +332,8 @@ fn focused_field(pid: i32) -> Option<CFType> {
 
 fn focused_window(pid: i32) -> Option<CFType> {
     let app = unsafe { CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid)) };
+    unsafe { AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 0.2) };
+    unsafe { AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 0.2) };
     attribute(&app, "AXFocusedWindow").or_else(|| {
         let field = focused_field(pid)?;
         let role = attribute(&field, "AXRole")?.downcast::<CFString>()?;

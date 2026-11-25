@@ -44,7 +44,20 @@ impl Speaky {
             && !self.correction.busy
             && self.unsaved.is_none()
         {
-            let text = text.to_owned();
+            // The home result may be an automatic rewrite. Spelling learning edits ASR only.
+            let text = match &target {
+                history::Target::Draft(path) => self
+                    .archive
+                    .iter()
+                    .find(|entry| &entry.path == path)
+                    .and_then(|entry| match &entry.state {
+                        drafts::State::Transcribed { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or(text)
+                    .to_owned(),
+                _ => text.to_owned(),
+            };
             return Some(button("改错词", false).id(id).on_click(cx.listener(
                 move |view, _, window, cx| {
                     view.open_correction(target.clone(), text.clone(), window, cx);

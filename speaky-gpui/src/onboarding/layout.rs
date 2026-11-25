@@ -23,6 +23,8 @@ pub(super) const WELCOME_WIDTH: Pixels = px(496.);
 pub(crate) enum Anchor {
     Workspace,
     Input,
+    Shortcut,
+    Language,
     Model,
     Service,
     Record,
