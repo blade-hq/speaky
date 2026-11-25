@@ -448,6 +448,40 @@ impl AutomationEditor {
             .is_ok_and(|id| id.to_string().eq_ignore_ascii_case("Chrome"))
     }
 
+    // Codex exposes the paragraph's CSS placeholder and trailing <br> as
+    // the value of an empty editor. A matching string alone could be a real draft.
+    fn displays_placeholder(&self, document: &str) -> bool {
+        let Some(label) = document.strip_suffix('\n').filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        unsafe {
+            let matches = || -> Option<bool> {
+                let class = self.field.CurrentClassName().ok()?.to_string();
+                if !class.split_ascii_whitespace().any(|s| s == "ProseMirror")
+                    || self.field.CurrentName().ok()?.to_string() != label
+                {
+                    return Some(false);
+                }
+                let walker = self.client.RawViewWalker().ok()?;
+                let paragraph = walker.GetFirstChildElement(&self.field).ok()?;
+                let class = paragraph.CurrentClassName().ok()?.to_string();
+                if paragraph.CurrentControlType().ok()? != UIA_GroupControlTypeId
+                    || !class.split_ascii_whitespace().any(|s| s == "placeholder")
+                    || !class
+                        .split_ascii_whitespace()
+                        .any(|s| s == "before:composer-placeholder")
+                {
+                    return Some(false);
+                }
+                let pattern: IUIAutomationTextPattern =
+                    self.field.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
+                let span = pattern.RangeFromChild(&paragraph).ok()?;
+                Some(contents(span.GetText(-1).ok()?).ok()? == document)
+            };
+            matches() == Some(true)
+        }
+    }
+
     fn text_value(&self) -> Result<String, String> {
         unsafe {
             if let Ok(value) = self
@@ -532,19 +566,31 @@ impl AutomationEditor {
         text: &str,
         deadline: Instant,
         check_position: impl Fn() -> Result<(), String>,
+        confirm_composition: Option<impl Fn() -> bool>,
     ) -> Result<(), String> {
         self.wait_for_input(focus, deadline)?;
-        let clipboard = if text.contains('\n') || text.contains('\t') {
-            Some(if self.is_chromium() {
+        let chromium = self.is_chromium();
+        let needs_paste = text.contains('\n') || text.contains('\t');
+        let clipboard = if needs_paste {
+            Some(if chromium {
                 clipboard::TemporaryText::for_chromium(text, deadline)?
             } else {
                 clipboard::TemporaryText::new(text, deadline)?
             })
+        } else if !chromium {
+            // Custom editors can ignore VK_PACKET. Prefer standard paste, but
+            // keep Unicode input available when the clipboard cannot be saved.
+            clipboard::TemporaryText::new(text, deadline).ok()
         } else {
             None
         };
-        let before = self.text_value()?;
-        let expected = self.edit_expectation(&before, text);
+        let expected_value = if confirm_composition.is_none() {
+            let before = self.text_value()?;
+            let expected = self.edit_expectation(&before, text);
+            Some((before, expected))
+        } else {
+            None
+        };
         self.check_input(focus, deadline)?;
         check_position()?;
         if let Some(clipboard) = &clipboard {
@@ -561,10 +607,17 @@ impl AutomationEditor {
         let mut observed = false;
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
-            if self.require_writable().is_err() {
+            if self.require_focus(focus).is_err() || self.require_writable().is_err() {
                 break;
             }
-            if self.saw_edit(&before, text, expected.as_ref()) {
+            if confirm_composition.as_ref().map_or_else(
+                || {
+                    expected_value.as_ref().is_some_and(|(before, expected)| {
+                        self.saw_edit(before, text, expected.as_ref())
+                    })
+                },
+                |confirm| confirm(),
+            ) {
                 observed = true;
                 break;
             }
