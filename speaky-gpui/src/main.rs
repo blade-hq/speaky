@@ -6,6 +6,8 @@ mod floating_control;
 #[cfg(windows)]
 mod hotkey_capture;
 mod icons;
+#[cfg(target_os = "macos")]
+mod mac_dictation;
 mod model_picker;
 mod onboarding;
 mod overlay;
@@ -99,6 +101,8 @@ enum RecordingDestination {
     Archive,
     #[cfg(windows)]
     External(Option<dictation_target::DictationTarget>),
+    #[cfg(target_os = "macos")]
+    MacExternal,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,6 +123,8 @@ struct Speaky {
     recording: Option<Recording>,
     global_hotkey: Option<hotkey::GlobalHotkey>,
     hotkey_status: String,
+    #[cfg(target_os = "macos")]
+    mac_dictation_access: bool,
     status: String,
     result: Option<(history::Target, String)>,
     correction: correction_ui::CorrectionEditor,
@@ -163,6 +169,8 @@ impl Speaky {
             recording: None,
             global_hotkey: hotkey,
             hotkey_status,
+            #[cfg(target_os = "macos")]
+            mac_dictation_access: mac_dictation::has_access(),
             status: String::new(),
             result: history::latest(&archive),
             correction: correction_ui::CorrectionEditor::default(),
@@ -295,7 +303,13 @@ impl Speaky {
         } else {
             RecordingDestination::Archive
         };
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        let destination = if source == RecordingStart::Desktop {
+            RecordingDestination::MacExternal
+        } else {
+            RecordingDestination::Archive
+        };
+        #[cfg(not(any(windows, target_os = "macos")))]
         let destination = RecordingDestination::Archive;
         let result = (|| {
             let config = config::Config::load().map_err(|error| error.to_string())?;
@@ -675,6 +689,8 @@ impl Speaky {
         }
         let completed_draft = draft.clone();
         self.status.clear();
+        #[cfg(target_os = "macos")]
+        let mac_external = matches!(destination, RecordingDestination::MacExternal);
         let task = cx.background_spawn(async move {
             let audio = std::fs::read(&draft).map_err(|error| error.to_string())?;
             if is_silent_recording(&audio) {
@@ -695,6 +711,7 @@ impl Speaky {
                 }
                 history::record(&draft, &text, engine.name())
                     .map_err(|error| format!("保存转写结果失败：{error}"))?;
+                #[cfg(not(target_os = "macos"))]
                 let status = match destination {
                     RecordingDestination::Archive => String::new(),
                     #[cfg(windows)]
@@ -707,6 +724,8 @@ impl Speaky {
                         "没有找到可输入的文本框。转写已保存，可在听写或历史中复制。".into()
                     }
                 };
+                #[cfg(target_os = "macos")]
+                let status = String::new();
                 Ok((text, status))
             };
             transcribe().map_err(|error| format!("{error}\n录音已保存至 {}", draft.display()))
@@ -722,8 +741,24 @@ impl Speaky {
                         if view.saved_recording.as_ref() == Some(&completed_draft) {
                             view.saved_recording = None;
                         }
-                        view.result = Some((history::Target::Draft(completed_draft), text));
                         view.transcript_scroll.set_offset(point(px(0.), px(0.)));
+                        #[cfg(target_os = "macos")]
+                        let status = if mac_external {
+                            // Dictation follows the editor focused when the transcript is ready.
+                            match mac_dictation::Target::capture() {
+                                Ok(Some(target)) => match target.insert(&text, cx) {
+                                    Ok(notice) => notice.into(),
+                                    Err(error) => {
+                                        format!("{error} 转写已保存，可在听写或历史中复制。")
+                                    }
+                                },
+                                Ok(None) => status,
+                                Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
+                            }
+                        } else {
+                            status
+                        };
+                        view.result = Some((history::Target::Draft(completed_draft), text));
                         view.status = status;
                     }
                     Err(error) => view.status = error,
@@ -984,6 +1019,14 @@ impl Speaky {
         } else {
             ("麦克风待命", ACCENT)
         };
+        #[cfg(not(target_os = "macos"))]
+        let external_help = "点目标输入框，按快捷键开始，再按一次结束。";
+        #[cfg(target_os = "macos")]
+        let external_help = if self.mac_dictation_access {
+            "辅助功能已授权。点目标输入框，按快捷键开始，再按一次结束。"
+        } else {
+            "当前 Speaky 尚未获得辅助功能权限。"
+        };
         let controls = card()
             .p_4()
             .flex()
@@ -1023,30 +1066,34 @@ impl Speaky {
                     ),
             )
             .child(
-                home_command(
-                    "在其他应用中听写",
-                    "点目标输入框，按快捷键开始，再按一次结束。",
-                    MUTED,
-                )
-                .border_t_1()
-                .border_color(rgb(BORDER))
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when_some(
-                            self.hotkey_status.strip_prefix("全局快捷键 "),
-                            |row, shortcut| row.child(studio_ui::keycap(shortcut)),
-                        )
-                        .child(button("更改", false).id("home-edit-shortcut").on_click(
-                            cx.listener(|view, _, window, cx| {
-                                view.open_shortcut_settings(window, cx)
-                            }),
-                        )),
-                ),
+                home_command("在其他应用中听写", external_help, MUTED)
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(
+                                self.hotkey_status.strip_prefix("全局快捷键 "),
+                                |row, shortcut| row.child(studio_ui::keycap(shortcut)),
+                            )
+                            .child(button("更改", false).id("home-edit-shortcut").on_click(
+                                cx.listener(|view, _, window, cx| {
+                                    view.open_shortcut_settings(window, cx)
+                                }),
+                            )),
+                    ),
             );
+        #[cfg(target_os = "macos")]
+        let controls = controls.when(!self.mac_dictation_access, |controls| {
+            controls.child(
+                button("打开辅助功能设置", false)
+                    .id("open-mac-accessibility-settings")
+                    .on_click(|_, _, cx| cx.open_url(mac_dictation::ACCESSIBILITY_SETTINGS)),
+            )
+        });
         let controls = controls.child(
             div()
                 .relative()
@@ -1894,7 +1941,20 @@ fn main() {
                         let executor = cx.background_executor().clone();
                         cx.spawn(async move |entity, cx| loop {
                             executor.timer(Duration::from_secs(2)).await;
-                            if entity.update(cx, Speaky::checkpoint).is_err() {
+                            if entity
+                                .update(cx, |view, cx| {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let access = mac_dictation::has_access();
+                                        if view.mac_dictation_access != access {
+                                            view.mac_dictation_access = access;
+                                            cx.notify();
+                                        }
+                                    }
+                                    view.checkpoint(cx);
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
                         })
@@ -2011,6 +2071,8 @@ fn main() {
             ],
         }]);
         cx.activate(true);
+        #[cfg(target_os = "macos")]
+        cx.defer(|_| mac_dictation::request_access());
         #[cfg(windows)]
         let _ = window.update(cx, |view, _, cx| {
             cx.observe_self(|view, cx| view.sync_floating(cx)).detach();

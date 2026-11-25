@@ -5360,6 +5360,8 @@ name = "speaky-gpui"
 version = "0.1.0"
 dependencies = [
  "block",
+ "core-foundation 0.10.0",
+ "core-graphics 0.24.0",
  "embed-resource",
  "embed_plist",
  "gpui",

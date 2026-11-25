@@ -3,6 +3,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(target_os = "macos")]
 mod mac_layout;
+#[cfg(target_os = "macos")]
+pub use mac_layout::character_key;
 mod shortcut;
 
 pub use shortcut::{Shortcut, ALT, CTRL, PLATFORM, SHIFT};
