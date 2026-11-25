@@ -73,6 +73,7 @@ pub(super) fn request_access() {
 pub(super) struct Target {
     pid: i32,
     field: CFType,
+    herdr_window: bool,
 }
 
 impl Target {
@@ -88,17 +89,27 @@ impl Target {
         let field = focused_field(pid).ok_or(NO_EDITOR)?;
         let role = attribute(&field, "AXRole").and_then(|value| value.downcast::<CFString>());
         let subrole = attribute(&field, "AXSubrole").and_then(|value| value.downcast::<CFString>());
-        if !role.is_some_and(|role| {
-            matches!(
-                role.to_string().as_str(),
-                "AXTextField" | "AXTextArea" | "AXComboBox"
-            )
-        }) || subrole.is_some_and(|role| role.to_string() == "AXSecureTextField")
-            || attribute(&field, "AXSelectedTextRange").is_none()
+        // Herdr's terminal exposes the focused window but no editable AX node.
+        let herdr_window = role
+            .as_ref()
+            .is_some_and(|role| role.to_string() == "AXWindow")
+            && bundle_is(pid, "dev.herdr.app");
+        if !herdr_window
+            && (!role.is_some_and(|role| {
+                matches!(
+                    role.to_string().as_str(),
+                    "AXTextField" | "AXTextArea" | "AXComboBox"
+                )
+            }) || subrole.is_some_and(|role| role.to_string() == "AXSecureTextField")
+                || attribute(&field, "AXSelectedTextRange").is_none())
         {
             return Err(NO_EDITOR.into());
         }
-        Ok(Some(Self { pid, field }))
+        Ok(Some(Self {
+            pid,
+            field,
+            herdr_window,
+        }))
     }
 
     pub(super) fn require_current(&self) -> Result<(), String> {
@@ -117,6 +128,9 @@ impl Target {
         cx: &mut gpui::Context<crate::Speaky>,
     ) -> Result<&'static str, String> {
         self.require_current()?;
+        if self.herdr_window && text.chars().any(char::is_control) {
+            return Err("转写含有换行或控制字符，请从历史复制到终端。".into());
+        }
         let selected_text = CFString::new("AXSelectedText");
         let cf_text = CFString::new(text);
         let mut settable = 0;
@@ -127,7 +141,7 @@ impl Target {
                 &mut settable,
             )
         };
-        if status == 0 && settable != 0 {
+        if !self.herdr_window && status == 0 && settable != 0 {
             // An AX write may have succeeded even if the target times out. Avoid
             // following a failed write with a paste that might duplicate it.
             self.require_current()?;
@@ -212,6 +226,18 @@ impl Target {
         units.splice(start..end, transcript.encode_utf16());
         let expected = String::from_utf16(&units).ok()?;
         (expected != value).then_some(expected)
+    }
+}
+
+fn bundle_is(pid: i32, identifier: &str) -> bool {
+    let identifier = CFString::new(identifier);
+    unsafe {
+        let app: *mut Object =
+            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+        let actual: *mut Object = msg_send![app, bundleIdentifier];
+        let matches: BOOL =
+            msg_send![actual, isEqualToString: identifier.as_concrete_TypeRef() as *mut Object];
+        matches == YES
     }
 }
 
