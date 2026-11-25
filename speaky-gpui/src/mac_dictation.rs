@@ -33,6 +33,7 @@ extern "C" {
     fn AXValueGetTypeID() -> CFTypeID;
     fn AXValueGetValue(value: CFTypeRef, kind: u32, out: *mut c_void) -> Boolean;
     fn AXUIElementCreateSystemWide() -> CFTypeRef;
+    fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
     fn AXUIElementGetTypeID() -> CFTypeID;
     fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
     fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> i32;
@@ -41,16 +42,7 @@ extern "C" {
         attribute: CFStringRef,
         value: *mut CFTypeRef,
     ) -> i32;
-    fn AXUIElementIsAttributeSettable(
-        element: CFTypeRef,
-        attribute: CFStringRef,
-        settable: *mut Boolean,
-    ) -> i32;
-    fn AXUIElementSetAttributeValue(
-        element: CFTypeRef,
-        attribute: CFStringRef,
-        value: CFTypeRef,
-    ) -> i32;
+
 }
 
 pub(super) const ACCESSIBILITY_SETTINGS: &str =
@@ -73,7 +65,8 @@ pub(super) fn request_access() {
 pub(super) struct Target {
     pid: i32,
     field: CFType,
-    herdr_window: bool,
+    window_scope: bool,
+    terminal: bool,
 }
 
 impl Target {
@@ -86,35 +79,60 @@ impl Target {
         if !has_access() {
             return Err(ACCESSIBILITY.into());
         }
-        let field = focused_field(pid).ok_or(NO_EDITOR)?;
-        let role = attribute(&field, "AXRole").and_then(|value| value.downcast::<CFString>());
-        let subrole = attribute(&field, "AXSubrole").and_then(|value| value.downcast::<CFString>());
-        // Herdr's terminal exposes the focused window but no editable AX node.
-        let herdr_window = role
+        let field = focused_field(pid);
+        let role = field
             .as_ref()
-            .is_some_and(|role| role.to_string() == "AXWindow")
-            && bundle_is(pid, "dev.herdr.app");
-        if !herdr_window
-            && (!role.is_some_and(|role| {
-                matches!(
-                    role.to_string().as_str(),
-                    "AXTextField" | "AXTextArea" | "AXComboBox"
-                )
-            }) || subrole.is_some_and(|role| role.to_string() == "AXSecureTextField")
-                || attribute(&field, "AXSelectedTextRange").is_none())
-        {
+            .and_then(|field| attribute(field, "AXRole"))
+            .and_then(|value| value.downcast::<CFString>());
+        let subrole = field
+            .as_ref()
+            .and_then(|field| attribute(field, "AXSubrole"))
+            .and_then(|value| value.downcast::<CFString>());
+        if subrole.is_some_and(|role| role.to_string() == "AXSecureTextField") {
             return Err(NO_EDITOR.into());
         }
-        Ok(Some(Self {
-            pid,
-            field,
-            herdr_window,
-        }))
+        if role.as_ref().is_some_and(|role| {
+            matches!(
+                role.to_string().as_str(),
+                "AXTextField" | "AXTextArea" | "AXComboBox"
+            )
+        }) {
+            return Ok(field.map(|field| Self {
+                pid,
+                field,
+                window_scope: false,
+                terminal: false,
+            }));
+        }
+
+        // Herdr and WeChat can expose just a window, even with their input
+        // areas focused. Retain the window's identity for the eventual paste.
+        let terminal = bundle_is(pid, "dev.herdr.app");
+        if terminal || bundle_is(pid, "com.tencent.xinWeChat") {
+            let field = focused_window(pid).ok_or(NO_EDITOR)?;
+            return Ok(Some(Self {
+                pid,
+                field,
+                window_scope: true,
+                terminal,
+            }));
+        }
+        Err(NO_EDITOR.into())
+    }
+
+    fn current_target(&self) -> Option<CFType> {
+        if self.window_scope {
+            focused_window(self.pid)
+        } else {
+            focused_field(self.pid)
+        }
     }
 
     pub(super) fn require_current(&self) -> Result<(), String> {
         if frontmost_pid() == Some(self.pid)
-            && focused_field(self.pid).is_some_and(|field| field == self.field)
+            && self
+                .current_target()
+                .is_some_and(|field| field == self.field)
         {
             Ok(())
         } else {
@@ -128,38 +146,17 @@ impl Target {
         cx: &mut gpui::Context<crate::Speaky>,
     ) -> Result<&'static str, String> {
         self.require_current()?;
-        if self.herdr_window && text.chars().any(char::is_control) {
+        if self.terminal && text.chars().any(char::is_control) {
             return Err("转写含有换行或控制字符，请从历史复制到终端。".into());
         }
-        let selected_text = CFString::new("AXSelectedText");
+        // A successful AX setter can be ignored by custom text editors.
+        // Deliver through the editor's regular paste command instead.
         let cf_text = CFString::new(text);
-        let mut settable = 0;
-        let status = unsafe {
-            AXUIElementIsAttributeSettable(
-                self.field.as_CFTypeRef(),
-                selected_text.as_concrete_TypeRef(),
-                &mut settable,
-            )
+        let expected = if self.window_scope {
+            None
+        } else {
+            self.expected_value(text)
         };
-        if !self.herdr_window && status == 0 && settable != 0 {
-            // An AX write may have succeeded even if the target times out. Avoid
-            // following a failed write with a paste that might duplicate it.
-            self.require_current()?;
-            let status = unsafe {
-                AXUIElementSetAttributeValue(
-                    self.field.as_CFTypeRef(),
-                    selected_text.as_concrete_TypeRef(),
-                    cf_text.as_CFTypeRef(),
-                )
-            };
-            return if status == 0 {
-                Ok("已输入到原来的输入框。")
-            } else {
-                Err(PASTE_FAILED.into())
-            };
-        }
-
-        let expected = self.expected_value(text);
         let source = CGEventSource::new(CGEventSourceStateID::Private).map_err(|_| PASTE_FAILED)?;
         let down =
             CGEvent::new_keyboard_event(source.clone(), ANSI_V, true).map_err(|_| PASTE_FAILED)?;
@@ -261,6 +258,15 @@ fn focused_field(pid: i32) -> Option<CFType> {
         let mut owner = 0;
         (AXUIElementGetPid(field.as_CFTypeRef(), &mut owner) == 0 && owner == pid).then_some(field)
     }
+}
+
+fn focused_window(pid: i32) -> Option<CFType> {
+    let app = unsafe { CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid)) };
+    attribute(&app, "AXFocusedWindow").or_else(|| {
+        let field = focused_field(pid)?;
+        let role = attribute(&field, "AXRole")?.downcast::<CFString>()?;
+        (role.to_string() == "AXWindow").then_some(field)
+    })
 }
 
 fn attribute(element: &CFType, name: &str) -> Option<CFType> {
