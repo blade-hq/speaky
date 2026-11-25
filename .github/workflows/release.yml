@@ -25,11 +25,17 @@ jobs:
         with:
           ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build Whisper runtime
+        shell: bash
+        run: bash scripts/build-whisper-runtime.sh
       - if: runner.os == 'macOS'
         name: Package macOS
         run: |
           cargo build --release --locked -p speaky-gpui
-          ditto -c -k --norsrc target/release/speaky-gpui Speaky-macOS.zip
+          mkdir -p target/macos-package
+          cp target/release/speaky-gpui target/macos-package/
+          cp -R target/whisper-runtime target/macos-package/
+          ditto -c -k --norsrc target/macos-package Speaky-macOS.zip
       - if: runner.os == 'Windows'
         name: Package Windows x64
         shell: pwsh
@@ -40,7 +46,7 @@ jobs:
           $env:GPUI_FXC_PATH = $fxc.FullName
           cargo build --release --locked -p speaky-gpui
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip
+          ./scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip -WhisperRuntime target/whisper-runtime
       - uses: actions/upload-artifact@v4
         with:
           name: Speaky-${{ runner.os }}

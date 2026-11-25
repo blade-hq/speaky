@@ -1,3 +1,6 @@
+mod download;
+pub use download::{download_whisper, is_managed_whisper, whisper_runtime, WhisperDownload};
+
 use crate::{
     config::Config,
     engines::{OpenAIEngine, RUNTIME},
@@ -98,6 +101,9 @@ impl Pack {
     }
 
     fn executable(&self) -> Result<PathBuf, String> {
+        if self.manifest.command[0] == "{whisper_runtime}" {
+            return whisper_runtime().ok_or_else(|| "找不到 Whisper 推理程序。".into());
+        }
         let path = Path::new(&self.manifest.command[0]);
         if path.is_absolute() {
             return path

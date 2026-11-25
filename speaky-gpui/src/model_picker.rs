@@ -1,6 +1,8 @@
 use super::{
     config::Config, model_packs, ActionTooltip, Page, Speaky, ACCENT, BORDER, INK, MUTED, SIDEBAR,
 };
+use std::{sync::Arc, time::Duration};
+
 use gpui::{div, prelude::*, px, rgb, rgba, Context, Div, Stateful};
 
 #[derive(Default)]
@@ -14,6 +16,8 @@ pub(super) struct ModelPicker {
     pub(super) preloading: bool,
     preload_error: Option<String>,
     error: Option<String>,
+    download: Option<Arc<model_packs::WhisperDownload>>,
+    can_download_whisper: bool,
     pub(super) pending_previews: usize,
 }
 
@@ -59,7 +63,7 @@ impl ModelPicker {
 
     #[cfg(windows)]
     pub(super) fn guide_has_no_models(&self) -> bool {
-        self.expanded && !self.listing && self.models.is_empty()
+        self.expanded && !self.listing && self.models.is_empty() && !self.can_download_whisper
     }
 }
 
@@ -138,12 +142,18 @@ impl Speaky {
         if !self.model_picker.listing {
             self.model_picker.listing = true;
             self.model_picker.models.clear();
-            let scan = cx.background_spawn(async { model_packs::list() });
+            let scan = cx.background_spawn(async {
+                (
+                    model_packs::list(),
+                    model_packs::whisper_runtime().is_some(),
+                )
+            });
             cx.spawn(async move |entity, cx| {
-                let result = scan.await;
+                let (result, can_download_whisper) = scan.await;
                 let _ = entity.update(cx, |view, cx| {
                     let picker = &mut view.model_picker;
                     picker.listing = false;
+                    picker.can_download_whisper = can_download_whisper;
                     match result {
                         Ok(models) => picker.models = models,
                         Err(error) if picker.expanded => picker.error = Some(error),
@@ -165,9 +175,59 @@ impl Speaky {
         if self.model_picker_busy() || !self.model_picker.expanded || self.model_picker.listing {
             return;
         }
-        self.model_picker.close();
-        self.model_picker.switching = Some(format!("正在加载本地模型包 {}…", model.label));
+        let notice = format!("正在加载本地模型包 {}…", model.label);
+        self.activate_model(notice, None, move || Ok(model), cx);
+    }
+
+    fn download_whisper(&mut self, cx: &mut Context<Self>) {
+        if self.model_picker_busy() || !self.model_picker.expanded || self.model_picker.listing {
+            return;
+        }
+        let download = Arc::new(model_packs::WhisperDownload::default());
+        let worker = download.clone();
+        self.activate_model(
+            "正在下载 Whisper Base…".into(),
+            Some(download.clone()),
+            move || model_packs::download_whisper(&worker),
+            cx,
+        );
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |entity, cx| loop {
+            executor.timer(Duration::from_millis(250)).await;
+            let active = entity.update(cx, |view, cx| {
+                if !view
+                    .model_picker
+                    .download
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &download))
+                {
+                    return false;
+                }
+                cx.notify();
+                true
+            });
+            if !matches!(active, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn activate_model(
+        &mut self,
+        notice: String,
+        download: Option<Arc<model_packs::WhisperDownload>>,
+        prepare: impl FnOnce() -> Result<model_packs::Pack, String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if download.is_none() {
+            self.model_picker.close();
+        }
+        self.model_picker.error = None;
+        self.model_picker.switching = Some(notice);
+        self.model_picker.download = download.clone();
         let task = cx.background_spawn(async move {
+            let model = prepare()?;
             model_packs::activate(&model)?;
             if let Err(error) = crate::settings::save_local_pack(&model.id) {
                 if let Err(release_error) = model_packs::release() {
@@ -181,9 +241,17 @@ impl Speaky {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
                 view.model_picker.switching = None;
+                view.model_picker.download = None;
                 view.refresh_model_selection();
                 if let Err(error) = result {
-                    view.model_picker.error = Some(format!("切换失败：{error}"));
+                    view.model_picker.error =
+                        Some(if download.as_ref().is_some_and(|job| job.is_cancelled()) {
+                            "已取消下载。".into()
+                        } else if download.is_some() {
+                            format!("Whisper Base 安装失败：{error}")
+                        } else {
+                            format!("切换失败：{error}")
+                        });
                     view.model_picker.expanded =
                         matches!(view.page, Page::Home | Page::Settings | Page::History);
                 } else if view.page == Page::Settings {
@@ -262,7 +330,7 @@ impl Speaky {
 
     pub(super) fn model_picker_panel(&self, cx: &mut Context<Self>) -> Option<Div> {
         let picker = &self.model_picker;
-        if !picker.expanded && picker.error.is_none() {
+        if !picker.expanded && picker.error.is_none() && picker.download.is_none() {
             return None;
         }
         let mut panel = div()
@@ -273,6 +341,29 @@ impl Speaky {
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(SIDEBAR));
+        if let Some(download) = &picker.download {
+            let percent = download.percent();
+            let notice = if download.is_cancelled() {
+                "正在取消下载…".into()
+            } else if percent == 100 {
+                "正在校验并启动 Whisper Base…".into()
+            } else {
+                format!("正在下载 Whisper Base · {percent}%")
+            };
+            panel = panel.child(div().px_2().py_1().child(notice));
+            if percent < 100 && !download.is_cancelled() {
+                let download = download.clone();
+                panel = panel.child(
+                    super::button("取消下载", false)
+                        .id("cancel-whisper-download")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            download.cancel();
+                            cx.notify();
+                        })),
+                );
+            }
+            return Some(panel);
+        }
         panel = panel.child(
             super::button("配置识别服务…", false)
                 .id("open-service-settings")
@@ -327,7 +418,22 @@ impl Speaky {
                 ),
             );
         }
-        if picker.models.is_empty() && picker.error.is_none() {
+        if !picker.models.iter().any(model_packs::is_managed_whisper) {
+            if picker.can_download_whisper {
+                panel = panel.child(
+                    super::button("下载并启动 Whisper Base（148 MB）", false)
+                        .id("download-whisper")
+                        .focusable()
+                        .tab_stop(true)
+                        .on_click(cx.listener(|view, _, _, cx| view.download_whisper(cx))),
+                );
+            } else if picker.models.is_empty() {
+                panel = panel.child(div().px_2().py_1().text_color(rgb(MUTED)).child(
+                    "需要包含 Whisper 推理程序的 Speaky 发布包，或本机已安装 whisper-server。",
+                ));
+            }
+        }
+        if picker.models.is_empty() && picker.error.is_none() && !picker.can_download_whisper {
             return Some(
                 panel.child(
                     div()
