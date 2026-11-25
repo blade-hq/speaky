@@ -102,7 +102,7 @@ enum RecordingDestination {
     #[cfg(windows)]
     External(Option<dictation_target::DictationTarget>),
     #[cfg(target_os = "macos")]
-    MacExternal(Result<mac_dictation::Target, String>),
+    MacExternal,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -220,15 +220,6 @@ impl Speaky {
         if let RecordingDestination::External(Some(target)) = &recording.destination {
             target.stop_preview();
         }
-        #[cfg(target_os = "macos")]
-        if let RecordingDestination::MacExternal(target) = &mut recording.destination {
-            if let Err(error) = target
-                .as_ref()
-                .map_or(Ok(()), mac_dictation::Target::require_current)
-            {
-                *target = Err(error);
-            }
-        }
         self.close_overlay(cx);
         let audio = recording.recorder.stop();
         if audio.is_empty() {
@@ -314,11 +305,7 @@ impl Speaky {
         };
         #[cfg(target_os = "macos")]
         let destination = if source == RecordingStart::Desktop {
-            match mac_dictation::Target::capture() {
-                Ok(None) => RecordingDestination::Archive,
-                Ok(Some(target)) => RecordingDestination::MacExternal(Ok(target)),
-                Err(error) => RecordingDestination::MacExternal(Err(error)),
-            }
+            RecordingDestination::MacExternal
         } else {
             RecordingDestination::Archive
         };
@@ -703,10 +690,7 @@ impl Speaky {
         let completed_draft = draft.clone();
         self.status.clear();
         #[cfg(target_os = "macos")]
-        let mac_target = match destination {
-            RecordingDestination::Archive => None,
-            RecordingDestination::MacExternal(target) => Some(target),
-        };
+        let mac_external = matches!(destination, RecordingDestination::MacExternal);
         let task = cx.background_spawn(async move {
             let audio = std::fs::read(&draft).map_err(|error| error.to_string())?;
             if is_silent_recording(&audio) {
@@ -759,12 +743,21 @@ impl Speaky {
                         }
                         view.transcript_scroll.set_offset(point(px(0.), px(0.)));
                         #[cfg(target_os = "macos")]
-                        let status = mac_target.map_or(status, |target| {
-                            match target.and_then(|target| target.insert(&text, cx)) {
-                                Ok(notice) => notice.into(),
+                        let status = if mac_external {
+                            // Dictation follows the editor focused when the transcript is ready.
+                            match mac_dictation::Target::capture() {
+                                Ok(Some(target)) => match target.insert(&text, cx) {
+                                    Ok(notice) => notice.into(),
+                                    Err(error) => {
+                                        format!("{error} 转写已保存，可在听写或历史中复制。")
+                                    }
+                                },
+                                Ok(None) => status,
                                 Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
                             }
-                        });
+                        } else {
+                            status
+                        };
                         view.result = Some((history::Target::Draft(completed_draft), text));
                         view.status = status;
                     }

@@ -19,7 +19,7 @@ use std::{
 };
 
 const FOCUS_CHANGED: &str = "输入焦点已改变。";
-const NO_EDITOR: &str = "开始听写前，请先点一下可编辑的输入框。";
+const NO_EDITOR: &str = "转写完成时没有找到可编辑的输入框。";
 const ACCESSIBILITY: &str = "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 Speaky 写入输入框。";
 const AX_VALUE_CF_RANGE: u32 = 4;
 const ANSI_V: u16 = 0x09;
