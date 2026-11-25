@@ -8,6 +8,23 @@ pub use mac_layout::character_key;
 mod shortcut;
 
 pub use shortcut::{Shortcut, ALT, CTRL, PLATFORM, SHIFT};
+
+pub fn escape_pressed() -> bool {
+    #[cfg(windows)]
+    unsafe {
+        return windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x1b) < 0;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "ApplicationServices", kind = "framework")]
+        extern "C" {
+            fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+        }
+        return unsafe { CGEventSourceKeyState(1, 53) };
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    false
+}
 #[cfg(windows)]
 pub use windows::{is_keyboard_key, is_modifier, WINDOWS_MODIFIERS};
 

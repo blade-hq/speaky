@@ -1,5 +1,6 @@
 config.yaml
 /packs/
+/ASR-Tests/
 /speaky-gpui/target/
 /target/
 /Speaky-macOS.zip

@@ -630,6 +630,22 @@ mod tests {
     }
 
     #[test]
+    fn relative_pack_remains_usable_after_copying_to_another_directory() {
+        let dir = TempDir::new();
+        let original = dir.0.join("original");
+        fs::create_dir_all(original.join("runtime")).unwrap();
+        fs::write(original.join("runtime/server.exe"), b"offline runtime").unwrap();
+        load(&original, &manifest()).unwrap().unwrap();
+        let moved = dir.0.join("copied-offline");
+        fs::rename(original, &moved).unwrap();
+        let pack = Pack::load(&moved).unwrap().unwrap();
+        assert_eq!(
+            pack.executable().unwrap(),
+            moved.join("runtime/server.exe").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn starts_probes_reuses_switches_and_releases_a_local_server() {
         let dir = TempDir::new();
         let executable = std::env::current_exe().unwrap();

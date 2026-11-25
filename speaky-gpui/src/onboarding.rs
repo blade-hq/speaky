@@ -4,6 +4,9 @@ mod effects;
 mod layout;
 mod motion;
 mod platform;
+pub(crate) async fn microphone_permission() -> bool {
+    platform::microphone_permission().await
+}
 
 use std::{
     path::Path,
@@ -30,27 +33,36 @@ const MARKER: &str = "onboarding-v1.done";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Step {
     Welcome,
+    Permissions,
+    Shortcut,
+    Language,
     Microphone,
     Model,
     Record,
     Result,
+    Practice,
     Finish,
 }
 
-const STEPS: [Step; 6] = [
+const STEPS: [Step; 10] = [
     Step::Welcome,
+    Step::Permissions,
+    Step::Shortcut,
+    Step::Language,
     Step::Microphone,
     Step::Model,
     Step::Record,
     Step::Result,
+    Step::Practice,
     Step::Finish,
 ];
 
 impl Step {
     fn page(self) -> Page {
         match self {
-            Self::Microphone => Page::Settings,
-            Self::Model if !cfg!(windows) => Page::Settings,
+            Self::Permissions | Self::Shortcut | Self::Language | Self::Microphone => {
+                Page::Settings
+            }
             _ => Page::Home,
         }
     }
@@ -162,7 +174,10 @@ enum GuideAction {
     Locate,
     CheckMicrophone,
     Privacy,
-    #[cfg(windows)]
+    Shortcut,
+    Language(&'static str),
+    #[cfg(target_os = "macos")]
+    Accessibility,
     Models,
     #[cfg(any(windows, target_os = "macos"))]
     Service,
@@ -220,7 +235,6 @@ impl Speaky {
         } else {
             cx.notify();
         }
-        #[cfg(windows)]
         if step == Step::Model {
             self.toggle_model_picker(cx);
         }
@@ -237,8 +251,8 @@ impl Speaky {
         } else {
             match step {
                 Step::Welcome => Scene::Welcome,
-                Step::Microphone => Scene::Microphone,
-                Step::Model => Scene::Model,
+                Step::Microphone | Step::Permissions => Scene::Microphone,
+                Step::Model | Step::Shortcut | Step::Language => Scene::Model,
                 Step::Record if self.recording.is_some() => Scene::Live,
                 Step::Record => Scene::Record,
                 Step::Result if self.page == Page::History => Scene::Archive,
@@ -254,6 +268,7 @@ impl Speaky {
                 }
                 Step::Result => Scene::Transcript,
                 Step::Finish => Scene::Finish,
+                Step::Practice => Scene::Record,
             }
         };
         let old_scene = self.tour.frame.scene;
@@ -319,7 +334,10 @@ impl Speaky {
             GuideAction::Locate => self.show_tour_step(step, cx),
             GuideAction::CheckMicrophone => self.check_tour_microphone(cx),
             GuideAction::Privacy => cx.open_url(platform::MICROPHONE_SETTINGS),
-            #[cfg(windows)]
+            GuideAction::Shortcut => self.open_shortcut_settings(window, cx),
+            GuideAction::Language(code) => self.guide_language(code, cx),
+            #[cfg(target_os = "macos")]
+            GuideAction::Accessibility => crate::mac_dictation::request_access(),
             GuideAction::Models => self.toggle_model_picker(cx),
             #[cfg(any(windows, target_os = "macos"))]
             GuideAction::Service => self.open_service_settings(window, cx),
@@ -366,14 +384,14 @@ impl Speaky {
         action(false)
             .id("replay-tour")
             .h(px(36.))
-            .flex_1()
+            .w_full()
             .justify_start()
             .px_2()
             .gap_1p5()
             .bg(rgb(SIDEBAR))
             .text_color(rgb(MUTED))
             .child(Icon::Guide.render(ACCENT))
-            .child("使用引导")
+            .child("进入引导")
             .when(!self.tour.is_active(), |row| {
                 row.track_focus(&self.tour.replay)
                     .tab_stop(true)
@@ -418,6 +436,8 @@ impl Speaky {
         let (primary, companion) = match frame.scene {
             Scene::Welcome | Scene::Finish | Scene::Exit => (Anchor::Workspace, None),
             Scene::Microphone => (Anchor::Input, None),
+            Scene::Model if self.tour.at(Step::Shortcut) => (Anchor::Shortcut, None),
+            Scene::Model if self.tour.at(Step::Language) => (Anchor::Language, None),
             Scene::Model if self.page == Page::Settings => (Anchor::Service, None),
             Scene::Model => (Anchor::Model, None),
             Scene::Record => (Anchor::Record, None),

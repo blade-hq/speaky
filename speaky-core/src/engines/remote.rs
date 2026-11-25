@@ -4,7 +4,7 @@ mod funasr;
 #[cfg(test)]
 mod tests;
 
-use super::{http_status_error, openai::RUNTIME, Engine, EngineError, EngineResult, OpenAIEngine};
+use super::{openai::RUNTIME, Engine, EngineError, EngineResult};
 use reqwest::{header::HeaderValue, multipart, Client, Url};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -33,7 +33,7 @@ impl Protocol {
 pub(crate) struct RemoteEngine {
     protocol: Protocol,
     endpoint: Url,
-    openai: Option<OpenAIEngine>,
+    model: String,
     authorization: Option<HeaderValue>,
     client: Client,
 }
@@ -76,15 +76,8 @@ impl RemoteEngine {
             .map_err(|_| "无法初始化识别服务连接。")?;
         Ok(Self {
             protocol,
-            openai: (protocol == Protocol::OpenAI).then(|| {
-                OpenAIEngine::at_endpoint(
-                    api_key.trim(),
-                    model.trim(),
-                    endpoint.to_string(),
-                    client.clone(),
-                )
-            }),
             endpoint,
+            model: model.trim().to_owned(),
             authorization,
             client,
         })
@@ -107,14 +100,7 @@ impl RemoteEngine {
                         )
                         .await
                     }
-                    Protocol::OpenAI => {
-                        self.openai
-                            .as_ref()
-                            .unwrap()
-                            .transcribe_async(audio, language, &[], true)
-                            .await
-                    }
-                    Protocol::WhisperCpp => self.http_transcribe(audio, language).await,
+                    _ => self.http_transcribe(audio, language).await,
                 }
             })
             .await
@@ -130,10 +116,13 @@ impl RemoteEngine {
         let mut form = multipart::Form::new()
             .part("file", file)
             .text("response_format", "json");
+        if self.protocol == Protocol::OpenAI {
+            form = form.text("model", self.model.clone());
+        }
         let language = language.split(['-', '_']).next().unwrap_or("").trim();
         if !language.is_empty() && language != "auto" {
             form = form.text("language", language.to_owned());
-        } else {
+        } else if self.protocol == Protocol::WhisperCpp {
             form = form.text("language", "auto");
         }
         let mut request = self.client.post(self.endpoint.clone()).multipart(form);
@@ -152,7 +141,7 @@ impl RemoteEngine {
         })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(http_status_error(status.as_u16()));
+            return Err(status_error(status.as_u16()));
         }
         let mut body = Vec::new();
         while let Some(chunk) = response
@@ -175,11 +164,24 @@ impl RemoteEngine {
     }
 }
 
+fn status_error(status: u16) -> EngineError {
+    let detail = match status {
+        401 | 403 => "请检查 API 密钥和访问权限。",
+        404 => "请检查转写路径和模型 ID。",
+        400 | 422 => "请检查模型 ID 和音频格式。",
+        429 => return EngineError::RateLimited("HTTP 429，服务请求过多或额度不足。".into()),
+        _ => "请检查服务状态。",
+    };
+    EngineError::NetworkError(format!("HTTP {status}，{detail}"))
+}
+
 impl Engine for RemoteEngine {
     fn name(&self) -> &str {
-        self.openai
-            .as_ref()
-            .map_or(self.protocol.label(), Engine::name)
+        if self.protocol == Protocol::OpenAI {
+            &self.model
+        } else {
+            self.protocol.label()
+        }
     }
 
     fn is_available(&self) -> bool {

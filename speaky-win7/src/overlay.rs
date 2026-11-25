@@ -69,7 +69,7 @@ impl Layer {
                 file,
                 drag: None,
             };
-            let area = work_area(owner);
+            let area = work_area(GetForegroundWindow());
             let persisted = fs::read_to_string(Config::config_dir().join(file))
                 .ok()
                 .and_then(|pos| {
@@ -129,6 +129,16 @@ impl Layer {
         }
     }
 
+    pub fn cancel_hit(&self) -> bool {
+        unsafe {
+            let mut cursor = POINT::default();
+            let mut bounds = RECT::default();
+            GetCursorPos(&mut cursor);
+            GetWindowRect(self.hwnd, &mut bounds);
+            (cursor.x - bounds.left) as f32 / self.scale < 48.
+        }
+    }
+
     pub fn pointer_update(&mut self, released: bool, overlay: bool) -> bool {
         let Some((start, bounds, mut moved)) = self.drag.take() else {
             return false;
@@ -162,9 +172,9 @@ impl Layer {
             let x = (cursor.x - bounds.left) as f32 / self.scale;
             let y = (cursor.y - bounds.top) as f32 / self.scale;
             if overlay {
-                (305. ..408.).contains(&x) && (12. ..42.).contains(&y)
+                ((12. ..42.).contains(&x) || (305. ..408.).contains(&x)) && (12. ..42.).contains(&y)
             } else {
-                (0. ..124.).contains(&x) && (0. ..40.).contains(&y)
+                (0. ..self.size.0 as f32 / self.scale).contains(&x) && (0. ..40.).contains(&y)
             }
         }
     }
@@ -247,8 +257,9 @@ impl Overlay {
                 0.94,
             )?;
             fill(target, rect(305., 12., 408., 42.), 9., 0x344558, 1.)?;
-            graphics.text(target, "停止并保存", rect(317., 17., 404., 42.))?;
-            graphics.text(target, &clock(elapsed), rect(15., 13., 70., 38.))?;
+            graphics.text(target, "✓ 停止并保存", rect(308., 17., 407., 42.))?;
+            graphics.text(target, "✕", rect(15., 17., 42., 42.))?;
+            graphics.text(target, &clock(elapsed), rect(56., 13., 118., 38.))?;
             graphics.wave(target, wave, WIDTH as f32, 39.)?;
             graphics.text(
                 target,

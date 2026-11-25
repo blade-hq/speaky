@@ -24,6 +24,7 @@ pub(super) struct RecordingOverlay {
     show_caption: bool,
     caption: String,
     on_finish: Rc<dyn Fn(&mut App)>,
+    on_cancel: Rc<dyn Fn(&mut App)>,
     #[cfg(windows)]
     drag: Rc<WindowDrag>,
 }
@@ -34,10 +35,15 @@ impl RecordingOverlay {
         show_controls: bool,
         show_caption: bool,
         on_finish: impl Fn(&mut App) + 'static,
+        on_cancel: impl Fn(&mut App) + 'static,
     ) -> Result<WindowHandle<Self>, String> {
-        let display = cx
-            .primary_display()
-            .ok_or_else(|| "未找到可显示录音悬浮窗的屏幕。".to_owned())?;
+        #[cfg(windows)]
+        let display = windows_floating::display_id(windows_floating::active_monitor(), cx)
+            .and_then(|id| cx.displays().into_iter().find(|display| display.id() == id))
+            .or_else(|| cx.primary_display());
+        #[cfg(not(windows))]
+        let display = cx.primary_display();
+        let display = display.ok_or_else(|| "未找到可显示录音悬浮窗的屏幕。".to_owned())?;
         let screen = display.bounds();
         let panel = if show_caption {
             size(
@@ -49,8 +55,8 @@ impl RecordingOverlay {
         };
         let bounds = Bounds::new(
             point(
-                (screen.size.width - panel.width) / 2.,
-                (screen.size.height - panel.height - px(84.)).max(px(0.)),
+                screen.origin.x + (screen.size.width - panel.width) / 2.,
+                screen.origin.y + (screen.size.height - panel.height - px(84.)).max(px(0.)),
             ),
             panel,
         );
@@ -80,7 +86,7 @@ impl RecordingOverlay {
                     });
                     #[cfg(windows)]
                     {
-                        native_result = show_panel(window, &bounds, &drag);
+                        native_result = show_panel(window, &bounds, &drag, Some(POSITION_FILE));
                     }
                     #[cfg(not(windows))]
                     {
@@ -99,6 +105,7 @@ impl RecordingOverlay {
                             String::new()
                         },
                         on_finish: Rc::new(on_finish),
+                        on_cancel: Rc::new(on_cancel),
                         #[cfg(windows)]
                         drag,
                     })
@@ -108,6 +115,15 @@ impl RecordingOverlay {
         if let Err(error) = native_result {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
             return Err(error);
+        }
+        #[cfg(windows)]
+        {
+            let executor = cx.background_executor().clone();
+            cx.spawn(async move |cx| {
+                executor.timer(std::time::Duration::from_millis(120)).await;
+                let _ = handle.update(cx, |_, window, _| window.resize(panel));
+            })
+            .detach();
         }
         Ok(handle)
     }
@@ -164,6 +180,9 @@ impl Render for RecordingOverlay {
         let seconds = self.elapsed_seconds;
         let timer = format!("{:02}:{:02}", seconds / 60, seconds % 60);
         let on_finish = self.on_finish.clone();
+        let on_cancel = self.on_cancel.clone();
+        #[cfg(windows)]
+        let cancel_drag = self.drag.clone();
         #[cfg(windows)]
         let drag = self.drag.clone();
         let controls = div()
@@ -172,6 +191,27 @@ impl Render for RecordingOverlay {
             .flex()
             .items_center()
             .gap_2()
+            .child(
+                div()
+                    .id("overlay-cancel")
+                    .size(px(26.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .rounded_full()
+                    .hover(|s| s.bg(rgba(0xffffff20)))
+                    .child(crate::icons::Icon::Close.render(0xc4cce3))
+                    .on_click(move |_, _, cx| {
+                        #[cfg(windows)]
+                        if cancel_drag.did_drag() {
+                            return;
+                        }
+                        let on_cancel = on_cancel.clone();
+                        cx.defer(move |cx| on_cancel(cx));
+                    }),
+            )
             .child(
                 div()
                     .flex()
@@ -193,7 +233,7 @@ impl Render for RecordingOverlay {
                     .rounded_full()
                     .bg(rgba(0x9eaaff26))
                     .hover(|style| style.bg(rgba(0x9eaaff40)))
-                    .child(div().size(px(10.)).rounded(px(1.5)).bg(rgb(0xeff2ff)))
+                    .child(crate::icons::Icon::Check.render(0xeff2ff))
                     .tooltip(|_, cx| cx.new(|_| StopTooltip).into())
                     .on_click(move |_, _, cx| {
                         #[cfg(windows)]
@@ -254,33 +294,29 @@ fn show_panel(_: &Window, _: &Bounds<Pixels>, _: bool) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn show_panel(
+pub(super) fn show_panel(
     window: &Window,
     bounds: &Bounds<Pixels>,
     drag: &Rc<WindowDrag>,
+    position_file: Option<&str>,
 ) -> Result<(), String> {
     use windows::Win32::{
         Foundation::POINT,
-        Graphics::Gdi::{
-            MonitorFromPoint, MonitorFromWindow, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
-        },
-        UI::{
-            HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
-            WindowsAndMessaging::GetForegroundWindow,
-        },
+        Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL},
+        UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
     };
 
-    let saved = windows_floating::saved_position(POSITION_FILE).and_then(|position| {
-        let point = POINT {
-            x: position.x,
-            y: position.y,
-        };
-        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) };
-        (!monitor.0.is_null()).then_some((position, monitor))
-    });
-    let monitor = saved.map(|(_, monitor)| monitor).unwrap_or_else(|| unsafe {
-        MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY)
-    });
+    let monitor = windows_floating::active_monitor();
+    let saved = position_file
+        .and_then(windows_floating::saved_position)
+        .and_then(|position| {
+            let point = POINT {
+                x: position.x,
+                y: position.y,
+            };
+            let saved_monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) };
+            (saved_monitor == monitor).then_some((position, monitor))
+        });
     let work =
         windows_floating::monitor_work_area(monitor).ok_or("无法取得字幕悬浮窗的工作区。")?;
     let (mut dpi_x, mut dpi_y) = (0, 0);
@@ -307,19 +343,18 @@ fn show_panel(
 
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
-fn show_panel(window: &Window, _: &Bounds<Pixels>, controls: bool) -> Result<(), String> {
+pub(super) fn show_panel(
+    window: &Window,
+    _: &Bounds<Pixels>,
+    controls: bool,
+) -> Result<(), String> {
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     use objc::{
         class, msg_send,
         runtime::{Object, NO, YES},
         sel, sel_impl,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    #[repr(C)]
-    struct Rect {
-        origin: [f64; 2],
-        size: [f64; 2],
-    }
 
     const HUD_MATERIAL: isize = 13;
     const BEHIND_WINDOW: isize = 0;
@@ -338,7 +373,7 @@ fn show_panel(window: &Window, _: &Bounds<Pixels>, controls: bool) -> Result<(),
             return Err("无法打开录音悬浮窗。".into());
         }
         let content: *mut Object = msg_send![panel, contentView];
-        let rect: Rect = msg_send![content, bounds];
+        let rect: CGRect = msg_send![content, bounds];
         let effect: *mut Object = msg_send![class!(NSVisualEffectView), alloc];
         let effect: *mut Object = msg_send![effect, initWithFrame: rect];
         let _: () = msg_send![effect, setMaterial: HUD_MATERIAL];
@@ -366,7 +401,68 @@ fn show_panel(window: &Window, _: &Bounds<Pixels>, controls: bool) -> Result<(),
         let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: YES];
         let ignore_mouse = if controls { NO } else { YES };
         let _: () = msg_send![panel, setIgnoresMouseEvents: ignore_mouse];
-        let _: () = msg_send![panel, setLevel: 3isize]; // NSFloatingWindowLevel
+        // NSFloatingWindowLevel
+        let _: () = msg_send![panel, setLevel: 3isize];
+        // Cocoa screen origins may be negative. Match the foreground window first;
+        // the pointer is only a fallback when accessibility cannot expose its frame.
+        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        let mouse: CGPoint = msg_send![class!(NSEvent), mouseLocation];
+        let mut screen: *mut Object = msg_send![class!(NSScreen), mainScreen];
+        let foreground = crate::mac_dictation::focused_window_bounds().and_then(|mut frame| {
+            if count == 0 {
+                return None;
+            }
+            let primary: *mut Object = msg_send![screens, objectAtIndex: 0usize];
+            let primary: CGRect = msg_send![primary, frame];
+            // Accessibility uses a top-left origin; NSScreen uses a bottom-left origin.
+            frame.origin.y =
+                primary.origin.y + primary.size.height - frame.origin.y - frame.size.height;
+            Some(frame)
+        });
+        let mut best_overlap = 0.;
+        let mut pointer_screen = None;
+        for index in 0..count {
+            let candidate: *mut Object = msg_send![screens, objectAtIndex: index];
+            let frame: CGRect = msg_send![candidate, frame];
+            if frame.contains(&mouse) {
+                pointer_screen = Some(candidate);
+            }
+            if let Some(foreground) = foreground {
+                let width = ((frame.origin.x + frame.size.width)
+                    .min(foreground.origin.x + foreground.size.width)
+                    - frame.origin.x.max(foreground.origin.x))
+                .max(0.);
+                let height = ((frame.origin.y + frame.size.height)
+                    .min(foreground.origin.y + foreground.size.height)
+                    - frame.origin.y.max(foreground.origin.y))
+                .max(0.);
+                let overlap = width * height;
+                if overlap > best_overlap {
+                    best_overlap = overlap;
+                    screen = candidate;
+                }
+            }
+        }
+        if best_overlap == 0. {
+            if let Some(pointer_screen) = pointer_screen {
+                screen = pointer_screen;
+            }
+        }
+        if !screen.is_null() {
+            let work: CGRect = msg_send![screen, visibleFrame];
+            let frame: CGRect = msg_send![panel, frame];
+            let dimensions = CGSize::new(
+                frame.size.width.min(work.size.width),
+                frame.size.height.min(work.size.height),
+            );
+            let origin = CGPoint::new(
+                work.origin.x + (work.size.width - dimensions.width) / 2.,
+                work.origin.y + 56f64.min((work.size.height - dimensions.height).max(0.)),
+            );
+            let frame = CGRect::new(&origin, &dimensions);
+            let _: () = msg_send![panel, setFrame: frame display: YES];
+        }
         let _: () = msg_send![panel, orderFrontRegardless];
     }
     Ok(())

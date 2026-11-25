@@ -1,9 +1,9 @@
-#[cfg(any(target_os = "macos", windows))]
-use super::service_ui;
 use super::{
     audio::AudioRecorder, button, config::Config, drafts, hotkey, onboarding::Anchor, page_heading,
     Page, Speaky, BORDER, MUTED, SURFACE,
 };
+#[cfg(any(target_os = "macos", windows))]
+use super::{engines::OpenAIEngine, service_ui};
 use gpui::{
     div, prelude::*, px, rgb, Context, Div, FocusHandle, SharedString, Subscription, Window,
 };
@@ -83,15 +83,19 @@ impl SettingsPage {
 }
 
 enum Preference {
+    DebugMode(bool),
     Shortcut(hotkey::Shortcut),
     #[cfg(windows)]
     FloatingButton(bool),
+    #[cfg(windows)]
     PreloadLocalModel(bool),
     LocalPack(String),
     Device(Option<String>),
     Language(&'static str),
     #[cfg(any(target_os = "macos", windows))]
     Service(service_ui::ServiceInput, bool),
+    #[cfg(any(target_os = "macos", windows))]
+    Framework(service_ui::ServiceInput, crate::config::Framework),
     #[cfg(any(target_os = "macos", windows))]
     Remote {
         service: crate::config::RemoteService,
@@ -129,6 +133,7 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
         serde_yaml::from_value::<Config>(yaml.clone()).map_err(|error| error.to_string())?
     };
     match preference {
+        Preference::DebugMode(enabled) => yaml["desktop"]["debug_mode"] = (*enabled).into(),
         Preference::Shortcut(preset) => {
             let key = if cfg!(windows) {
                 "windows_toggle_hotkey"
@@ -146,9 +151,11 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
         Preference::FloatingButton(enabled) => {
             yaml["desktop"]["windows_floating_button"] = (*enabled).into();
         }
+        #[cfg(windows)]
         Preference::LocalPack(id) => {
             yaml["engine"]["current"] = "local".into();
             yaml["engine"]["local_pack"] = id.as_str().into();
+            yaml["engine"]["local"] = Value::Null;
         }
         Preference::PreloadLocalModel(enabled) => {
             yaml["desktop"]["preload_local_model"] = (*enabled).into();
@@ -175,9 +182,16 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
             yaml["engine"]["current"] = "remote".into();
         }
         #[cfg(any(target_os = "macos", windows))]
-        Preference::Service(input, _) => {
+        Preference::Service(input, _) | Preference::Framework(input, _) => {
             let organizer = matches!(preference, Preference::Service(_, true));
-            let (old_url, old_key) = if organizer {
+            let framework = match preference {
+                Preference::Framework(_, f) => Some(*f),
+                _ => None,
+            };
+            let profile = framework.map(|f| f.service(&existing));
+            let (old_url, old_key) = if let Some(profile) = &profile {
+                (&profile.base_url, &profile.api_key)
+            } else if organizer {
                 (&existing.llm.openai.base_url, &existing.llm.openai.api_key)
             } else {
                 (
@@ -196,10 +210,14 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
                 .map(str::trim)
                 .filter(|key| !key.is_empty());
             let same_origin = service_url(old_url).is_ok_and(|old| old.origin() == url.origin());
-            if key.is_none() && (old_key.trim().is_empty() || !same_origin) {
+            let optional_key = framework.is_some() && crate::engines::loopback(&url);
+            if key.is_none() && !optional_key && (old_key.trim().is_empty() || !same_origin) {
                 return Err("请填写此服务的 API 密钥。无鉴权的内网服务可填 EMPTY。".into());
             }
-            let target = if organizer {
+            let target = if let Some(framework) = framework {
+                yaml["engine"]["current"] = framework.id.into();
+                &mut yaml["engine"]["frameworks"][framework.id]
+            } else if organizer {
                 yaml["llm"]["enabled"] = true.into();
                 &mut yaml["llm"]["openai"]
             } else {
@@ -256,6 +274,10 @@ fn remote_editor_values(config: &Config) -> (String, String, String) {
             remote.api_key.clone(),
         );
     }
+    if let Some(framework) = crate::config::Framework::selected(config) {
+        let service = framework.service(config);
+        return (service.base_url, service.model, service.api_key);
+    }
     let service = &config.engine.openai;
     if config.engine.current == "openai" && !crate::engines::uses_local_asr(config) {
         return (
@@ -292,6 +314,61 @@ fn submitted_key(
 }
 
 impl Speaky {
+    pub(crate) fn guide_language(&mut self, code: &'static str, cx: &mut Context<Self>) {
+        self.apply_preference(Preference::Language(code), cx);
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    pub(super) fn resolve_framework_name(&self, cx: &mut Context<Self>) {
+        let Ok(config) = Config::load() else { return };
+        let Some(framework) = crate::config::Framework::selected(&config) else {
+            return;
+        };
+        let profile = framework.service(&config);
+        if framework.is_builtin_endpoint(&profile.base_url)
+            && profile.model == framework.preset_name()
+        {
+            return;
+        }
+        let task = cx.background_spawn(async move {
+            let engine = OpenAIEngine::from_framework(framework, &config).ok()?;
+            engine.check_model().ok()?;
+            engine.catalog_id().map(str::to_owned)
+        });
+        cx.spawn(async move |entity, cx| {
+            let Some(name) = task.await else { return };
+            if name == profile.model {
+                return;
+            }
+            let _ = entity.update(cx, |view, cx| {
+                let Ok(current) = Config::load() else { return };
+                let active = framework.service(&current);
+                if current.engine.current != framework.id
+                    || active.base_url != profile.base_url
+                    || active.model != profile.model
+                    || active.api_key != profile.api_key
+                {
+                    return;
+                }
+                let input = service_ui::ServiceInput {
+                    base_url: active.base_url,
+                    model: name,
+                    api_key: None,
+                };
+                if save(
+                    &Config::config_path(),
+                    &Preference::Framework(input, framework),
+                )
+                .is_ok()
+                {
+                    view.reload_settings();
+                    view.refresh_model_selection();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+    #[cfg(any(target_os = "macos", windows))]
     pub(super) fn open_service_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_picker.close();
         self.open_page(Page::Settings, cx);
@@ -302,6 +379,18 @@ impl Speaky {
         self.cancel_shortcut_capture(cx);
         if page != self.page {
             self.tour.request_reveal();
+        }
+        #[cfg(windows)]
+        {
+            if self.page == Page::Benchmark && page != Page::Benchmark && self.benchmark.playing {
+                self.stop_playback();
+            }
+            if matches!(page, Page::Home | Page::Benchmark) {
+                self.refresh_model_selection();
+            }
+            if page == Page::Benchmark && self.page != page {
+                self.load_benchmark(cx);
+            }
         }
         self.refresh_model_selection();
         self.page = page;
@@ -498,8 +587,15 @@ impl Speaky {
     }
 
     pub(crate) fn release_local_model(&mut self, cx: &mut Context<Self>) {
-        self.model_picker.switching = Some("正在释放本地模型包…".into());
-        let task = cx.background_spawn(async { crate::model_packs::release() });
+        self.model_picker.switching = Some("正在释放本地模型…".into());
+        let task = cx.background_spawn(async {
+            crate::model_packs::release()?;
+            #[cfg(windows)]
+            if crate::local_models::has_owned_manager() {
+                crate::local_models::release()?;
+            }
+            Ok::<_, String>(())
+        });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
@@ -515,10 +611,24 @@ impl Speaky {
     }
 
     fn apply_preference(&mut self, preference: Preference, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", windows))]
         let changing_service = matches!(
             &preference,
-            Preference::Service(_, false) | Preference::Remote { .. }
+            Preference::Service(_, false) | Preference::Framework(_, _) | Preference::Remote { .. }
         );
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let changing_service = false;
+        #[cfg(windows)]
+        let owned_gpu = crate::local_models::has_owned_manager();
+        #[cfg(not(windows))]
+        let owned_gpu = false;
+        let leaving_local = changing_service
+            && (self
+                .settings
+                .config
+                .as_ref()
+                .is_some_and(crate::engines::uses_local_asr)
+                || owned_gpu);
         if let Some(reason) = changing_service
             .then(|| self.model_switch_blocker())
             .flatten()
@@ -563,13 +673,24 @@ impl Speaky {
             }
             self.settings.picker = None;
             self.reload_settings();
+            #[cfg(windows)]
             if matches!(preference, Preference::PreloadLocalModel(true)) {
                 if let Some(config) = self.settings.config.clone() {
                     self.preload_selected_model(config, cx);
                 }
             }
-            if changing_service {
+            if leaving_local
+                && self
+                    .settings
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| !crate::engines::uses_local_asr(config))
+            {
                 self.release_local_model(cx);
+            }
+            #[cfg(any(target_os = "macos", windows))]
+            if matches!(preference, Preference::Framework(_, _)) {
+                self.resolve_framework_name(cx);
             }
         }
         #[cfg(windows)]
@@ -859,7 +980,9 @@ impl Speaky {
         let capture = section(
             "录音",
             [
-                self.shortcut_row(shortcut, busy, cx),
+                self.shortcut_row(shortcut, busy, cx)
+                    .relative()
+                    .children(self.tour.mark(Anchor::Shortcut)),
                 self.setting_picker(
                     Picker::Device,
                     "输入设备",
@@ -916,6 +1039,7 @@ impl Speaky {
             ],
         );
         let local = crate::engines::uses_local_asr(config);
+        let framework = crate::config::Framework::selected(config);
         let remote = &config.engine.remote;
         let volc = &config.engine.volc_bigmodel;
         let volc_configured = config.engine.current == "volc_bigmodel"
@@ -924,6 +1048,7 @@ impl Speaky {
                 || std::env::var_os("SPEAKY_VOLC_API_KEY").is_some_and(|key| !key.is_empty()));
         let configured = local
             || volc_configured
+            || framework.is_some()
             || matches!(config.engine.current.as_str(), "remote" | "openai");
         let service_summary = if config.engine.current == "remote" {
             if remote.model.is_empty() {
@@ -936,8 +1061,24 @@ impl Speaky {
                     remote.endpoint
                 )
             }
+        } else if let Some(f) = framework {
+            let profile = f.service(config);
+            format!(
+                "OpenAI 兼容转写 · {} · {}",
+                f.display_model(&profile.model),
+                profile.base_url
+            )
         } else if local {
-            self.model_picker.label().to_owned()
+            #[cfg(windows)]
+            let model = crate::model_picker::selected_label(config);
+            #[cfg(not(windows))]
+            let model = config
+                .engine
+                .local
+                .as_ref()
+                .map(|s| s.model.clone())
+                .unwrap_or_default();
+            format!("本机 GPU · {model}")
         } else if volc_configured {
             "火山引擎".into()
         } else if configured {
@@ -986,14 +1127,9 @@ impl Speaky {
         let recognition = section(
             "识别",
             [
-                setting_row(
-                    "接入方式",
-                    Some(&service_summary),
-                    actions.child(self.model_picker_button(cx)),
-                )
-                .relative()
-                .children(self.tour.mark(Anchor::Service)),
-                div().children(self.model_picker_panel(cx)),
+                setting_row("接入方式", Some(&service_summary), actions)
+                    .relative()
+                    .children(self.tour.mark(Anchor::Service)),
                 div().when(local, |row| {
                     row.child(setting_row(
                         "本地模型包",
@@ -1018,7 +1154,7 @@ impl Speaky {
                         .model_picker
                         .preload_notice()
                         .filter(|_| enabled && local)
-                        .unwrap_or("在 Speaky 启动时提前加载选中的本地模型包。");
+                        .unwrap_or("在 Speaky 启动时提前加载选中的本地识别模型。");
                     setting_row(
                         "启动时预加载模型",
                         Some(description),
@@ -1040,6 +1176,8 @@ impl Speaky {
                     .border_color(rgb(BORDER))
                 },
                 self.setting_picker(Picker::Language, "识别语言", None, language_label, busy, cx)
+                    .relative()
+                    .children(self.tour.mark(Anchor::Language))
                     .when(
                         !busy && self.settings.picker == Some(Picker::Language),
                         |row| {
@@ -1064,6 +1202,7 @@ impl Speaky {
             ],
         );
         body.child(capture)
+            .child(self.input_status(cx))
             .child(recognition)
             .child(self.organizer_section(config, busy, cx))
     }
@@ -1084,7 +1223,7 @@ impl Speaky {
                     .map_or_else(|_| "地址无效".into(), |url| url.to_string())
             )
         } else {
-            "未启用".into()
+            "未启用（建议开启）".into()
         };
         let mut controls = div().flex().gap_1();
         #[cfg(any(target_os = "macos", windows))]
@@ -1105,7 +1244,7 @@ impl Speaky {
                         if checking {
                             "测试中…"
                         } else {
-                            "运行固定基准"
+                            "测试大模型"
                         },
                         false,
                     )
@@ -1136,6 +1275,27 @@ impl Speaky {
             "语音整理",
             [
                 setting_row("整理模型", Some(&summary), controls),
+                setting_row(
+                    "Debug 模式",
+                    Some("在历史中查看脱敏后的模型名、系统提示词和实际输入。"),
+                    div().child(
+                        button(
+                            if config.desktop.debug_mode {
+                                "关闭"
+                            } else {
+                                "开启"
+                            },
+                            false,
+                        )
+                        .id("toggle-debug-mode")
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            let enabled = Config::load()
+                                .map(|c| !c.desktop.debug_mode)
+                                .unwrap_or(true);
+                            view.apply_preference(Preference::DebugMode(enabled), cx);
+                        })),
+                    ),
+                ),
                 div().when(llm.enabled, |row| {
                     let mut actions = div().flex().gap_1();
                     #[cfg(any(target_os = "macos", windows))]
@@ -1421,6 +1581,65 @@ fn options(elements: impl IntoIterator<Item = impl IntoElement>) -> Div {
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn framework_settings_are_isolated_and_local_bridges_need_no_key() {
+        let path = std::env::temp_dir()
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("config.yaml");
+        let funasr = crate::config::Framework::ALL[0];
+        let kaldi = crate::config::Framework::ALL[7];
+        let input = |url: &str, model: &str, key: Option<&str>| service_ui::ServiceInput {
+            base_url: url.into(),
+            model: model.into(),
+            api_key: key.map(str::to_owned),
+        };
+        save(
+            &path,
+            &Preference::Service(
+                input("https://example.com/v1", "previous", Some("original")),
+                false,
+            ),
+        )
+        .unwrap();
+        save(
+            &path,
+            &Preference::Framework(
+                input("https://remote.example/v1", "zh", Some("remote-key")),
+                funasr,
+            ),
+        )
+        .unwrap();
+        save(
+            &path,
+            &Preference::Framework(input("http://127.0.0.1:18768/v1", "kaldi", None), kaldi),
+        )
+        .unwrap();
+        let load = || serde_yaml::from_str::<Config>(&fs::read_to_string(&path).unwrap()).unwrap();
+        let config = load();
+        assert_eq!(config.engine.current, "kaldi");
+        assert_eq!(config.engine.openai.api_key, "original");
+        assert_eq!(funasr.service(&config).api_key, "remote-key");
+        assert_eq!(kaldi.service(&config).api_key, "");
+        assert_eq!(
+            crate::config::Framework::ALL[1].service(&config).base_url,
+            "http://127.0.0.1:18762/v1"
+        );
+        assert!(save(
+            &path,
+            &Preference::Framework(input("https://other.example/v1", "zh", None), funasr)
+        )
+        .is_err());
+        assert_eq!(load().engine.current, "kaldi");
+        save(
+            &path,
+            &Preference::Framework(input("http://localhost:18761/v1", "small", None), funasr),
+        )
+        .unwrap();
+        assert_eq!(funasr.service(&load()).api_key, "");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn compares_sample_words_across_script_spacing_and_punctuation() {
         for transcript in [
@@ -1516,12 +1735,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn model_preloading_is_opt_in_and_persists_without_changing_model_selection() {
         let directory = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("config.yaml");
-        let original =
-            "engine:\n  current: local\n  local_pack: sample-pack\ndesktop:\n  auto_start: false\n";
+        let original = "engine:\n  current: local\n  local:\n    model: Qwen3-ASR-1.7B\ndesktop:\n  auto_start: false\n";
         fs::write(&path, original).unwrap();
         assert!(!Config::default().desktop.preload_local_model);
         let old: Config = serde_yaml::from_str(original).unwrap();

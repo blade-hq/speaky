@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use super::local_models;
 use super::{
     config::Config, model_packs, ActionTooltip, Page, Speaky, ACCENT, BORDER, INK, MUTED, SIDEBAR,
 };
@@ -5,13 +7,107 @@ use std::{sync::Arc, time::Duration};
 
 use gpui::{div, prelude::*, px, rgb, rgba, Context, Div, Stateful};
 
+#[derive(Clone)]
+struct Candidate {
+    id: String,
+    label: String,
+    pack: Option<model_packs::Pack>,
+}
+
+pub(super) fn selected_id(config: &Config) -> Option<&str> {
+    #[cfg(windows)]
+    if let Some(id) = local_models::selected_id(config) {
+        if model_packs::selected_id(config).is_none() {
+            return Some(id);
+        }
+    }
+    model_packs::selected_id(config)
+}
+
+pub(super) fn selected_label(config: &Config) -> String {
+    #[cfg(windows)]
+    if model_packs::selected_id(config).is_none() {
+        return local_models::selected_label(config);
+    }
+    model_packs::selected_label(config)
+}
+
+fn available_models() -> Result<Vec<Candidate>, String> {
+    let packs = model_packs::list();
+    #[cfg(windows)]
+    let gpu = local_models::list();
+    #[cfg(not(windows))]
+    let gpu: Result<Vec<Candidate>, String> = Ok(Vec::new());
+    #[cfg(windows)]
+    let gpu = gpu.map(|models| {
+        models
+            .into_iter()
+            .map(|model| Candidate {
+                id: model.id,
+                label: model.label,
+                pack: None,
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut models = Vec::new();
+    match (packs, gpu) {
+        (Err(pack_error), Err(gpu_error)) => return Err(format!("{pack_error} {gpu_error}")),
+        (packs, gpu) => {
+            models.extend(packs.unwrap_or_default().into_iter().map(|pack| Candidate {
+                id: pack.id.clone(),
+                label: pack.label.clone(),
+                pack: Some(pack),
+            }));
+            models.extend(gpu.unwrap_or_default());
+        }
+    }
+    Ok(models)
+}
+
+fn activate(model: Candidate) -> Result<(), String> {
+    if let Some(pack) = model.pack {
+        return activate_pack(&pack);
+    }
+    #[cfg(windows)]
+    {
+        model_packs::release()?;
+        let endpoint = local_models::activate(&model.id)?;
+        if let Err(error) = local_models::select(&endpoint) {
+            if let Err(release_error) = local_models::release() {
+                log::warn!("释放本地 GPU 模型失败：{release_error}");
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    Err("找不到本地模型包。".into())
+}
+
+fn activate_pack(pack: &model_packs::Pack) -> Result<(), String> {
+    #[cfg(windows)]
+    if local_models::has_owned_manager() {
+        local_models::release()?;
+    }
+    model_packs::activate(pack)?;
+    if let Err(error) = crate::settings::save_local_pack(&pack.id) {
+        if let Err(release_error) = model_packs::release() {
+            log::warn!("释放本地模型失败：{release_error}");
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub(super) struct ModelPicker {
     label: String,
     selected: Option<String>,
+    #[cfg(windows)]
+    benchmark_model: Option<crate::benchmark::BenchmarkModel>,
     expanded: bool,
     listing: bool,
-    models: Vec<model_packs::Pack>,
+    models: Vec<Candidate>,
     pub(super) switching: Option<String>,
     pub(super) preloading: bool,
     preload_error: Option<String>,
@@ -30,18 +126,18 @@ impl ModelPicker {
 
     fn read_selection(&mut self, config: Option<&Config>) {
         self.label = config
-            .map(model_packs::selected_label)
+            .map(selected_label)
             .unwrap_or_else(|| "配置读取失败".into());
-        self.selected = config.and_then(model_packs::selected_id).map(str::to_owned);
+        self.selected = config.and_then(selected_id).map(str::to_owned);
+        #[cfg(windows)]
+        {
+            self.benchmark_model = config.and_then(crate::benchmark::BenchmarkModel::selected);
+        }
     }
 
     pub(super) fn close(&mut self) {
         self.expanded = false;
         self.error = None;
-    }
-
-    pub(super) fn label(&self) -> &str {
-        &self.label
     }
 
     pub(super) fn switching_notice(&self) -> Option<&str> {
@@ -57,11 +153,14 @@ impl ModelPicker {
     }
 
     #[cfg(windows)]
+    pub(super) fn benchmark_model(&self) -> Option<&crate::benchmark::BenchmarkModel> {
+        self.benchmark_model.as_ref()
+    }
+
     pub(super) fn guide_is_open(&self) -> bool {
         self.expanded
     }
 
-    #[cfg(windows)]
     pub(super) fn guide_has_no_models(&self) -> bool {
         self.expanded && !self.listing && self.models.is_empty() && !self.can_download_whisper
     }
@@ -85,14 +184,16 @@ impl Speaky {
     pub(super) fn preload_selected_model(&mut self, config: Config, cx: &mut Context<Self>) {
         if !config.desktop.preload_local_model
             || self.model_picker.preloading
-            || model_packs::selected_id(&config).is_none()
+            || selected_id(&config).is_none_or(|id| id.trim().is_empty())
         {
             return;
         }
         self.model_picker.preloading = true;
         self.model_picker.preload_error = None;
         let task =
-            cx.background_spawn(async move { model_packs::ready_engine(&config).map(|_| ()) });
+            cx.background_spawn(
+                async move { crate::engines::recognition_engine(&config).map(|_| ()) },
+            );
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
@@ -108,15 +209,31 @@ impl Speaky {
     }
 
     pub(super) fn model_switch_blocker(&self) -> Option<&'static str> {
-        if self.recording.is_some() || self.transcribing || self.model_picker.pending_previews != 0
+        if self.starting
+            || self.recording.is_some()
+            || self.transcribing
+            || self.model_picker.pending_previews != 0
         {
             Some("录音或转写结束后可切换模型")
+        } else if self.model_benchmark_running() {
+            Some("本条录音识别结束后可切换模型")
         } else if self.settings.recognition_checking() {
             Some("识别服务检查结束后可切换模型")
         } else if self.model_picker.preloading {
             Some("预加载结束后可切换模型")
         } else {
             None
+        }
+    }
+
+    fn model_benchmark_running(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.benchmark.is_running()
+        }
+        #[cfg(not(windows))]
+        {
+            false
         }
     }
 
@@ -143,10 +260,7 @@ impl Speaky {
             self.model_picker.listing = true;
             self.model_picker.models.clear();
             let scan = cx.background_spawn(async {
-                (
-                    model_packs::list(),
-                    model_packs::whisper_runtime().is_some(),
-                )
+                (available_models(), model_packs::whisper_runtime().is_some())
             });
             cx.spawn(async move |entity, cx| {
                 let (result, can_download_whisper) = scan.await;
@@ -159,7 +273,6 @@ impl Speaky {
                         Err(error) if picker.expanded => picker.error = Some(error),
                         Err(_) => {}
                     }
-                    #[cfg(windows)]
                     if view.tour.at(crate::onboarding::Step::Model) {
                         view.tour.model_rows_arrived();
                     }
@@ -171,12 +284,12 @@ impl Speaky {
         cx.notify();
     }
 
-    fn choose_model(&mut self, model: model_packs::Pack, cx: &mut Context<Self>) {
+    fn choose_model(&mut self, model: Candidate, cx: &mut Context<Self>) {
         if self.model_picker_busy() || !self.model_picker.expanded || self.model_picker.listing {
             return;
         }
-        let notice = format!("正在加载本地模型包 {}…", model.label);
-        self.activate_model(notice, None, move || Ok(model), cx);
+        let notice = format!("正在加载 {}…", model.label);
+        self.activate_model(notice, None, move || activate(model), cx);
     }
 
     fn download_whisper(&mut self, cx: &mut Context<Self>) {
@@ -188,7 +301,10 @@ impl Speaky {
         self.activate_model(
             "正在下载 Whisper Base…".into(),
             Some(download.clone()),
-            move || model_packs::download_whisper(&worker),
+            move || {
+                let pack = model_packs::download_whisper(&worker)?;
+                activate_pack(&pack)
+            },
             cx,
         );
         let executor = cx.background_executor().clone();
@@ -217,7 +333,7 @@ impl Speaky {
         &mut self,
         notice: String,
         download: Option<Arc<model_packs::WhisperDownload>>,
-        prepare: impl FnOnce() -> Result<model_packs::Pack, String> + Send + 'static,
+        prepare: impl FnOnce() -> Result<(), String> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         if download.is_none() {
@@ -226,17 +342,7 @@ impl Speaky {
         self.model_picker.error = None;
         self.model_picker.switching = Some(notice);
         self.model_picker.download = download.clone();
-        let task = cx.background_spawn(async move {
-            let model = prepare()?;
-            model_packs::activate(&model)?;
-            if let Err(error) = crate::settings::save_local_pack(&model.id) {
-                if let Err(release_error) = model_packs::release() {
-                    log::warn!("释放本地模型失败：{release_error}");
-                }
-                return Err(error);
-            }
-            Ok::<_, String>(())
-        });
+        let task = cx.background_spawn(async move { prepare() });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
@@ -252,8 +358,11 @@ impl Speaky {
                         } else {
                             format!("切换失败：{error}")
                         });
-                    view.model_picker.expanded =
-                        matches!(view.page, Page::Home | Page::Settings | Page::History);
+                    view.model_picker.expanded = matches!(view.page, Page::Home | Page::History);
+                    #[cfg(windows)]
+                    if view.page == Page::Benchmark {
+                        view.model_picker.expanded = true;
+                    }
                 } else if view.page == Page::Settings {
                     view.reload_settings();
                 }
@@ -290,7 +399,7 @@ impl Speaky {
                     .flex_none()
                     .text_color(rgb(MUTED))
                     .child(if picker.selected.is_some() {
-                        "本地模型"
+                        "模型 · GPU"
                     } else {
                         "模型"
                     }),
@@ -389,24 +498,6 @@ impl Speaky {
         if !picker.expanded {
             return Some(panel);
         }
-        panel = panel.child(
-            super::button("打开模型包目录", false)
-                .id("open-model-packs")
-                .on_click(cx.listener(|view, _, _, cx| {
-                    let directory = model_packs::prepare_directory().and_then(|path| {
-                        reqwest::Url::from_directory_path(path)
-                            .map_err(|_| "无法打开模型包目录。".to_owned())
-                    });
-                    match directory {
-                        Ok(url) => {
-                            cx.open_url(url.as_str());
-                            view.model_picker.error = None;
-                        }
-                        Err(error) => view.model_picker.error = Some(error),
-                    }
-                    cx.notify();
-                })),
-        );
         if picker.listing {
             return Some(
                 panel.child(
@@ -418,7 +509,12 @@ impl Speaky {
                 ),
             );
         }
-        if !picker.models.iter().any(model_packs::is_managed_whisper) {
+        if !picker.models.iter().any(|model| {
+            model
+                .pack
+                .as_ref()
+                .is_some_and(model_packs::is_managed_whisper)
+        }) {
             if picker.can_download_whisper {
                 panel = panel.child(
                     super::button("下载并启动 Whisper Base（148 MB）", false)
@@ -440,7 +536,7 @@ impl Speaky {
                         .px_2()
                         .py_1()
                         .text_color(rgb(MUTED))
-                        .child("未找到适用于此系统的模型包。请将解压后的模型包放入 packs 目录。"),
+                        .child("未找到本地语音识别模型。"),
                 ),
             );
         }
@@ -453,15 +549,14 @@ impl Speaky {
                     .children(picker.models.iter().enumerate().map(|(index, model)| {
                         let selected = picker.selected.as_deref() == Some(model.id.as_str());
                         let model = model.clone();
-                        #[cfg(windows)]
-                        let motion = self.tour.model_row_motion(index);
-                        #[cfg(not(windows))]
-                        let motion: Option<(f32, gpui::Pixels)> = None;
                         div()
                             .id(("home-model-option", index))
-                            .when_some(motion, |row, (opacity, offset)| {
-                                row.relative().top(offset).opacity(opacity)
-                            })
+                            .when_some(
+                                self.tour.model_row_motion(index),
+                                |row, (opacity, offset)| {
+                                    row.relative().top(offset).opacity(opacity)
+                                },
+                            )
                             .h(px(34.))
                             .px_2()
                             .flex()

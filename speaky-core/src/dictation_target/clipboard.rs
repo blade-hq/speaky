@@ -19,6 +19,13 @@ use windows_sys::Win32::System::Memory::{
 const BACKUP_ERROR: &str = "无法完整备份剪贴板，这次转写已保留。";
 const RESTORE_ERROR: &str = "Windows 未能还原原剪贴板。";
 
+pub(super) fn copy_text(text: &str) -> Result<(), String> {
+    let _ole = Ole::start()?;
+    let object = temporary_object(&text.replace('\n', "\r\n"), Marker::new()?)?;
+    unsafe { OleSetClipboard(&object).and_then(|_| OleFlushClipboard()) }
+        .map_err(|_| "无法写入剪贴板，转写仍保存在历史中。".into())
+}
+
 struct Ole;
 impl Ole {
     fn start() -> Result<Self, String> {

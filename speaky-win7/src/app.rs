@@ -1,9 +1,9 @@
 use speaky_core::{
-    audio::{AudioRecorder, PreviewAudio, VoiceActivity},
+    audio::{PreviewAudio, VoiceActivity},
     config::Config,
-    dictation_target::{DictationTarget, Foreground},
-    drafts, engines, history,
-    session::{is_silent_recording, LivePreview, SILENT_INPUT},
+    dictation_target::{self, DictationTarget, Foreground, StopFocus},
+    drafts, engines, history, pipeline,
+    session::{is_silent_recording, SILENT_INPUT},
     terms,
 };
 use std::{
@@ -19,7 +19,8 @@ pub const UPDATE: u32 = WM_APP + 1;
 pub type Rows = Vec<(history::Target, String, String)>;
 
 pub enum Event {
-    Started(Sender<()>),
+    Started(Sender<StopRequest>),
+    ClipboardNotice,
     History(Rows),
     EditFailed(String, String),
     Aux(String),
@@ -29,6 +30,7 @@ pub enum Event {
     TranscriptionFailed(PathBuf, String, Rows),
     Unsaved(Pending, String),
     Settings(Result<(Config, String), String>),
+    ModelCatalog(u64, bool, Result<engines::ModelCatalog, String>),
     Devices(Vec<(u32, String)>),
     Dictionary(Result<(String, Vec<String>), String>),
 }
@@ -53,6 +55,29 @@ pub struct Pending {
     target: Option<DictationTarget>,
     external: bool,
     config: Config,
+    cancelled: bool,
+}
+
+pub struct StopRequest {
+    pub cancelled: bool,
+    focus: StopFocus,
+    startup_target: Option<Result<DictationTarget, String>>,
+}
+impl StopRequest {
+    pub fn new(cancelled: bool) -> Self {
+        Self {
+            cancelled,
+            focus: StopFocus::capture(),
+            startup_target: None,
+        }
+    }
+
+    pub fn during_startup() -> Self {
+        Self {
+            startup_target: Some(DictationTarget::capture_at_stop(None)),
+            ..Self::new(false)
+        }
+    }
 }
 
 pub fn rows() -> Rows {
@@ -118,27 +143,20 @@ fn record(
     external: bool,
     updates: &Updates,
 ) -> Result<(), String> {
-    let asr = &config.core.asr;
-    let mut recorder = AudioRecorder::new_with_name(
-        asr.audio_device,
-        asr.audio_device_name.as_deref(),
-        asr.audio_gain,
-    )?;
-    let path = if let Some(path) = old {
-        let wav = fs::read(&path).map_err(|error| error.to_string())?;
-        recorder.resume_wav(&wav)?;
-        path
-    } else {
-        recorder.start()?;
-        drafts::new_path()
-    };
+    let resume = old.is_some();
+    let path = old.unwrap_or_else(drafts::new_path);
+    let (mut recorder, mut preview) = speaky_core::session::open_recording(&config, &path, resume)?;
     let (stop, stopped) = mpsc::channel();
-    let mut preview = LivePreview::new(recorder.sample_count());
     let mut decoding: Option<Receiver<_>> = None;
     let mut checkpoint = Instant::now();
     let mut checkpoint_error = None;
     updates.send(Event::Started(stop));
-    while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(Duration::from_millis(65)) {
+    let request = loop {
+        match stopped.recv_timeout(Duration::from_millis(65)) {
+            Ok(request) => break request,
+            Err(RecvTimeoutError::Disconnected) => break StopRequest::new(true),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
         if checkpoint.elapsed() >= Duration::from_secs(2) {
             let wav = recorder.wav_snapshot();
             if !wav.is_empty() {
@@ -200,11 +218,26 @@ fn record(
             (recorder.sample_count() / 16000) as u64,
             caption.to_owned(),
         ));
-    }
+    };
     if let Some(target) = &target {
         target.stop_preview();
     }
     let wav = recorder.stop();
+    let target = if request.cancelled {
+        if let Some(target) = &target {
+            if let Err(error) = target.cancel_preview() {
+                updates.send(Event::Aux(error));
+            }
+        }
+        None
+    } else if external {
+        request
+            .startup_target
+            .unwrap_or_else(|| DictationTarget::capture_stopped(request.focus, target.as_ref()))
+            .ok()
+    } else {
+        None
+    };
     if wav.is_empty() {
         return Err("没有收到音频，请检查麦克风。".into());
     }
@@ -215,6 +248,7 @@ fn record(
             target,
             external,
             config,
+            cancelled: request.cancelled,
         },
         updates,
     );
@@ -234,7 +268,12 @@ fn finish(pending: Pending, updates: &Updates) {
         return;
     }
     updates.send(Event::Saved(rows()));
-    if is_silent_recording(&pending.wav) {
+    if pending.cancelled {
+        updates.send(Event::Done(
+            "已取消转写，原始录音已保存在历史中。".into(),
+            rows(),
+        ));
+    } else if is_silent_recording(&pending.wav) {
         updates.send(Event::Done(format!("录音已保存。{SILENT_INPUT}"), rows()));
     } else {
         publish_transcript(
@@ -258,29 +297,38 @@ pub fn retranscribe(config: Config, path: PathBuf, updates: Updates) {
 fn publish_transcript(
     config: &Config,
     path: PathBuf,
-    wav: &[u8],
+    _wav: &[u8],
     target: Option<DictationTarget>,
     external: bool,
     updates: &Updates,
 ) {
-    let result =
-        transcribe(config, wav, engines::TranscriptionPass::Final).and_then(|(text, engine)| {
-            history::record(&path, &text, &engine).map_err(|error| error.to_string())?;
-            Ok(text)
-        });
+    let result = pipeline::transcribe_saved(config, &path);
     match result {
-        Ok(text) => {
+        Ok(transcript) => {
+            let text = transcript.text;
             let delivery = if external {
-                DictationTarget::deliver_final(target.as_ref(), &text)
+                target
+                    .ok_or_else(|| "停止时未找到可写输入框。".into())
+                    .and_then(|target| target.deliver(&text))
+                    .map(|_| true)
             } else {
                 Ok(false)
             };
             let status = match delivery {
                 Ok(true) => "已输入到当前输入框。".into(),
                 Ok(false) => "转写已保存。".into(),
-                Err(error) => format!("转写已保存，可在历史中复制。{error}"),
+                Err(error) => match dictation_target::copy_fallback(&text) {
+                    Ok(()) => {
+                        updates.send(Event::ClipboardNotice);
+                        format!("{error} 语音识别内容已保存到剪贴板，请手动粘贴")
+                    }
+                    Err(clipboard) => format!("{error} {clipboard}"),
+                },
             };
-            updates.send(Event::Done(status, rows()));
+            updates.send(Event::Done(
+                format!("{} {status}", transcript.notice),
+                rows(),
+            ));
         }
         Err(error) => updates.send(Event::TranscriptionFailed(
             path,
