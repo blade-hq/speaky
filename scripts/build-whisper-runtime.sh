@@ -3,7 +3,7 @@ set -euo pipefail
 
 git clone --depth 1 --branch v1.9.1 https://github.com/ggml-org/whisper.cpp.git target/whisper-source
 cmake -S target/whisper-source -B target/whisper-build \
-  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
   -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_SERVER=ON \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
