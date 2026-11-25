@@ -28,6 +28,10 @@ jobs:
       - if: runner.os == 'macOS'
         run: cargo build -p speaky-gpui --locked
       - if: runner.os == 'Windows'
+        name: Build Whisper runtime
+        shell: bash
+        run: bash scripts/build-whisper-runtime.sh
+      - if: runner.os == 'Windows'
         name: Build portable Windows client
         shell: pwsh
         run: |
@@ -37,7 +41,7 @@ jobs:
           $env:GPUI_FXC_PATH = $fxc.FullName
           cargo build -p speaky-gpui --release --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip
+          ./scripts/package-windows.ps1 -Executable target/release/speaky-gpui.exe -Output Speaky-Windows-x64.zip -WhisperRuntime target/whisper-runtime
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:

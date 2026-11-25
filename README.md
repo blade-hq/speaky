@@ -26,6 +26,8 @@ Windows 构建后也可双击 `start-windows.cmd`。首次录音前，请在 Win
 
 ## 接入语音识别
 
+- **下载并启动 Whisper Base。** 在「工作台 → 识别模型」点击「下载并启动 Whisper Base」。首次下载约 148 MB，完成后应用会启动模型并切换到本地识别。macOS 和 Windows 桌面发布包附带推理程序。从源码运行时，应用也可以使用本机已安装的 `whisper-server`。
+
 - **本地离线模型包。** 将适用于当前系统的包解压到可执行文件同级的 `packs/`，在「工作台 → 识别模型」选择。每个包自带推理运行时和权重，可在断网环境中启动。
 - **外部服务。** 在「设置 → 识别 → 配置服务」输入已部署的地址，按需填写模型 ID 和 API 密钥。应用会试转写一段录音，检测 OpenAI 兼容 HTTP、whisper.cpp 原生 HTTP 或 FunASR WebSocket。火山引擎通过 `config.yaml` 配置。
 

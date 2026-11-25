@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [Parameter(Mandatory = $true)][string]$Output
+    [Parameter(Mandatory = $true)][string]$Output,
+    [string]$WhisperRuntime
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression
@@ -12,6 +13,12 @@ $files = [ordered]@{
     'start-windows.cmd' = Join-Path $root 'start-windows.cmd'
     'scripts/start-windows.ps1' = Join-Path $PSScriptRoot 'start-windows.ps1'
     'config.example.yaml' = Join-Path $root 'config.example.yaml'
+}
+if ($WhisperRuntime) {
+    foreach ($name in @('whisper-server.exe', 'LICENSE')) {
+        $runtimeFile = Get-Item -LiteralPath (Join-Path $WhisperRuntime $name)
+        $files["whisper-runtime/$name"] = $runtimeFile.FullName
+    }
 }
 $guide = Get-Item (Join-Path $root 'docs/Windows*.md')
 $files["docs/$($guide.Name)"] = $guide.FullName
