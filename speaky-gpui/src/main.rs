@@ -6,6 +6,8 @@ mod floating_control;
 #[cfg(windows)]
 mod hotkey_capture;
 mod icons;
+#[cfg(target_os = "macos")]
+mod mac_dictation;
 mod model_picker;
 mod onboarding;
 mod overlay;
@@ -99,6 +101,8 @@ enum RecordingDestination {
     Archive,
     #[cfg(windows)]
     External(Option<dictation_target::DictationTarget>),
+    #[cfg(target_os = "macos")]
+    MacExternal(Result<mac_dictation::Target, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -212,6 +216,15 @@ impl Speaky {
         if let RecordingDestination::External(Some(target)) = &recording.destination {
             target.stop_preview();
         }
+        #[cfg(target_os = "macos")]
+        if let RecordingDestination::MacExternal(target) = &mut recording.destination {
+            if let Err(error) = target
+                .as_ref()
+                .map_or(Ok(()), mac_dictation::Target::require_current)
+            {
+                *target = Err(error);
+            }
+        }
         self.close_overlay(cx);
         let audio = recording.recorder.stop();
         if audio.is_empty() {
@@ -295,7 +308,17 @@ impl Speaky {
         } else {
             RecordingDestination::Archive
         };
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        let destination = if source == RecordingStart::Desktop {
+            match mac_dictation::Target::capture() {
+                Ok(None) => RecordingDestination::Archive,
+                Ok(Some(target)) => RecordingDestination::MacExternal(Ok(target)),
+                Err(error) => RecordingDestination::MacExternal(Err(error)),
+            }
+        } else {
+            RecordingDestination::Archive
+        };
+        #[cfg(not(any(windows, target_os = "macos")))]
         let destination = RecordingDestination::Archive;
         let result = (|| {
             let config = config::Config::load().map_err(|error| error.to_string())?;
@@ -675,6 +698,11 @@ impl Speaky {
         }
         let completed_draft = draft.clone();
         self.status.clear();
+        #[cfg(target_os = "macos")]
+        let mac_target = match destination {
+            RecordingDestination::Archive => None,
+            RecordingDestination::MacExternal(target) => Some(target),
+        };
         let task = cx.background_spawn(async move {
             let audio = std::fs::read(&draft).map_err(|error| error.to_string())?;
             if is_silent_recording(&audio) {
@@ -695,6 +723,7 @@ impl Speaky {
                 }
                 history::record(&draft, &text, engine.name())
                     .map_err(|error| format!("保存转写结果失败：{error}"))?;
+                #[cfg(not(target_os = "macos"))]
                 let status = match destination {
                     RecordingDestination::Archive => String::new(),
                     #[cfg(windows)]
@@ -707,6 +736,8 @@ impl Speaky {
                         "没有找到可输入的文本框。转写已保存，可在听写或历史中复制。".into()
                     }
                 };
+                #[cfg(target_os = "macos")]
+                let status = String::new();
                 Ok((text, status))
             };
             transcribe().map_err(|error| format!("{error}\n录音已保存至 {}", draft.display()))
@@ -722,8 +753,15 @@ impl Speaky {
                         if view.saved_recording.as_ref() == Some(&completed_draft) {
                             view.saved_recording = None;
                         }
-                        view.result = Some((history::Target::Draft(completed_draft), text));
                         view.transcript_scroll.set_offset(point(px(0.), px(0.)));
+                        #[cfg(target_os = "macos")]
+                        let status = mac_target.map_or(status, |target| {
+                            match target.and_then(|target| target.insert(&text, cx)) {
+                                Ok(()) => "已输入到原来的输入框。".into(),
+                                Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
+                            }
+                        });
+                        view.result = Some((history::Target::Draft(completed_draft), text));
                         view.status = status;
                     }
                     Err(error) => view.status = error,
