@@ -67,7 +67,7 @@ fn translated_char(layout: Ref, key: u16, modifiers: u32, keyboard: u32) -> Opti
 
 // Interpret GPUI's printed key using the active layout. GPUI can represent a
 // shifted punctuation key as a character with the Shift modifier folded in.
-pub(super) fn character_key(c: char, command: bool) -> Result<(u16, char, bool), String> {
+pub fn character_key(c: char, command: bool) -> Result<(u16, char, bool), String> {
     let keyboard = u32::from(unsafe { LMGetKbdType() });
     for get_source in [
         TISCopyCurrentKeyboardLayoutInputSource,

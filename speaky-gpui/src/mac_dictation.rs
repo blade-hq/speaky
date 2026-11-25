@@ -22,7 +22,6 @@ const FOCUS_CHANGED: &str = "输入焦点已改变。";
 const NO_EDITOR: &str = "转写完成时没有找到可编辑的输入框。";
 const ACCESSIBILITY: &str = "请在「系统设置 → 隐私与安全性 → 辅助功能」中允许 Speaky 写入输入框。";
 const AX_VALUE_CF_RANGE: u32 = 4;
-const ANSI_V: u16 = 0x09;
 const PASTE_FAILED: &str = "无法向原输入框粘贴转写。";
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -157,12 +156,17 @@ impl Target {
         } else {
             self.expected_value(text)
         };
+        let (key, _, shifted) = speaky_core::hotkey::character_key('v', true)?;
         let source = CGEventSource::new(CGEventSourceStateID::Private).map_err(|_| PASTE_FAILED)?;
         let down =
-            CGEvent::new_keyboard_event(source.clone(), ANSI_V, true).map_err(|_| PASTE_FAILED)?;
-        let up = CGEvent::new_keyboard_event(source, ANSI_V, false).map_err(|_| PASTE_FAILED)?;
-        down.set_flags(CGEventFlags::CGEventFlagCommand);
-        up.set_flags(CGEventFlags::CGEventFlagCommand);
+            CGEvent::new_keyboard_event(source.clone(), key, true).map_err(|_| PASTE_FAILED)?;
+        let up = CGEvent::new_keyboard_event(source, key, false).map_err(|_| PASTE_FAILED)?;
+        let mut flags = CGEventFlags::CGEventFlagCommand;
+        if shifted {
+            flags |= CGEventFlags::CGEventFlagShift;
+        }
+        down.set_flags(flags);
+        up.set_flags(flags);
         let mut clipboard = Pasteboard::put(&cf_text).ok_or(PASTE_FAILED)?;
         self.require_current()?;
         if !clipboard.is_current() {
