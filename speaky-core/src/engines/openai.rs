@@ -180,7 +180,6 @@ impl OpenAIEngine {
         self.resolved.get().map(|m| m.wire_id.as_str())
     }
 
-    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn check_model_for(&self, owner: Option<u32>) -> Result<(), String> {
         let resolved = RUNTIME.block_on(self.catalog_model(owner))?;
         let _ = self.resolved.set(resolved);
@@ -565,6 +564,22 @@ mod tests {
             assert!(decode(body).is_err());
         }
     }
+
+    #[test]
+    fn openai_engine_availability_allows_unauthenticated_loopback_with_model() {
+        use super::{Engine, OpenAIEngine};
+
+        assert!(OpenAIEngine::new("", "whisper-1", "http://127.0.0.1:8080/v1").is_available());
+        assert!(OpenAIEngine::new("", "whisper-1", "http://localhost:8080/v1").is_available());
+        assert!(!OpenAIEngine::new("", "whisper-1", "https://api.openai.com/v1").is_available());
+        assert!(
+            OpenAIEngine::new("sk-test", "whisper-1", "https://api.openai.com/v1").is_available()
+        );
+        assert!(!OpenAIEngine::new("", "   ", "http://127.0.0.1:8080/v1").is_available());
+        assert!(
+            !OpenAIEngine::new("sk-test", "   ", "https://api.openai.com/v1").is_available()
+        );
+    }
 }
 
 impl Engine for OpenAIEngine {
@@ -573,7 +588,10 @@ impl Engine for OpenAIEngine {
     }
 
     fn is_available(&self) -> bool {
-        self.framework.is_some() || !self.api_key.is_empty()
+        !self.model.trim().is_empty()
+            && (self.framework.is_some()
+                || !self.api_key.is_empty()
+                || reqwest::Url::parse(&self.base_url).is_ok_and(|url| loopback(&url)))
     }
 
     fn transcribe(&self, audio_data: &[u8], language: &str) -> EngineResult {

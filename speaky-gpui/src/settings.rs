@@ -87,7 +87,6 @@ enum Preference {
     Shortcut(hotkey::Shortcut),
     #[cfg(windows)]
     FloatingButton(bool),
-    #[cfg(windows)]
     PreloadLocalModel(bool),
     LocalPack(String),
     Device(Option<String>),
@@ -151,7 +150,6 @@ fn save(path: &Path, preference: &Preference) -> Result<(), String> {
         Preference::FloatingButton(enabled) => {
             yaml["desktop"]["windows_floating_button"] = (*enabled).into();
         }
-        #[cfg(windows)]
         Preference::LocalPack(id) => {
             yaml["engine"]["current"] = "local".into();
             yaml["engine"]["local_pack"] = id.as_str().into();
@@ -1735,7 +1733,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn model_preloading_is_opt_in_and_persists_without_changing_model_selection() {
         let directory = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         fs::create_dir_all(&directory).unwrap();

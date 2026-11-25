@@ -938,7 +938,6 @@ impl Speaky {
         }
     }
 
-    #[cfg(windows)]
     fn compare_recording(&mut self, draft: PathBuf, cx: &mut Context<Self>) {
         if self.recording.is_some()
             || self.transcribing
@@ -1695,7 +1694,6 @@ impl Speaky {
                                             .on_mouse_down(
                                                 MouseButton::Left,
                                                 cx.listener(move |view, _, _, cx| {
-                                                    #[cfg(windows)]
                                                     view.compare_recording(compare.clone(), cx);
                                                 }),
                                             ),

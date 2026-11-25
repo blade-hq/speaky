@@ -92,7 +92,6 @@ pub(crate) struct Tour {
     pub(crate) copied: bool,
     transition: u64,
     leaving: bool,
-    #[cfg(windows)]
     model_rows: Option<Instant>,
 }
 
@@ -113,7 +112,6 @@ impl Tour {
             copied: false,
             transition: 0,
             leaving: false,
-            #[cfg(windows)]
             model_rows: None,
         }
     }
@@ -142,7 +140,6 @@ impl Tour {
         self.layout.reveal();
     }
 
-    #[cfg(windows)]
     pub(crate) fn model_rows_arrived(&mut self) {
         if self.at(Step::Model) {
             self.model_rows = Some(Instant::now());
@@ -150,7 +147,6 @@ impl Tour {
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn model_row_motion(&self, index: usize) -> Option<(f32, Pixels)> {
         if !self.at(Step::Model) || !self.frame.moving {
             return None;
@@ -225,11 +221,8 @@ impl Speaky {
         self.tour.step = Some(step);
         self.tour.transition = self.tour.transition.wrapping_add(1);
         self.tour.layout.reset();
-        #[cfg(windows)]
-        {
-            self.model_picker.close();
-            self.tour.model_rows = None;
-        }
+        self.model_picker.close();
+        self.tour.model_rows = None;
         if self.page != step.page() || step.page() == Page::Settings {
             self.open_page(step.page(), cx);
         } else {
@@ -284,10 +277,7 @@ impl Speaky {
             self.finish_tour(window, cx);
             return;
         }
-        #[cfg(windows)]
         let model_options_moving = self.tour.model_row_motion(6).is_some();
-        #[cfg(not(windows))]
-        let model_options_moving = false;
         if frame.animating() || model_options_moving {
             window.request_animation_frame();
         }
