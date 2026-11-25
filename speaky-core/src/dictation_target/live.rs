@@ -56,10 +56,17 @@ impl Editor {
         Self { focus, automation }
     }
 
-    fn writable(&self) -> Result<(), String> {
-        self.focus.require_current()?;
+    pub(super) fn require_focus(&self) -> Result<(), String> {
         if let Some(editor) = &self.automation {
-            editor.require_focus(self.focus)?;
+            editor.require_focus(self.focus)
+        } else {
+            self.focus.require_current()
+        }
+    }
+
+    fn writable(&self) -> Result<(), String> {
+        self.require_focus()?;
+        if let Some(editor) = &self.automation {
             editor.require_writable()
         } else if self.focus.is_native_edit() && self.focus.writable_native() {
             Ok(())
@@ -87,11 +94,18 @@ impl Editor {
                     &range,
                     TextPatternRangeEndpoint_End,
                 ))?;
-                let selection = Selection {
+                let mut selection = Selection {
                     before: contents(readable(before.GetText(-1))?)?,
                     selected: contents(readable(range.GetText(-1))?)?,
                     after: contents(readable(after.GetText(-1))?)?,
                 };
+                if editor.displays_placeholder(
+                    &[&*selection.before, &*selection.selected, &*selection.after].concat(),
+                ) {
+                    selection.before.clear();
+                    selection.selected.clear();
+                    selection.after.clear();
+                }
                 return Ok(selection);
             }
         }
@@ -180,41 +194,45 @@ impl Editor {
                 ))?;
                 // Providers count UTF-16, Unicode characters and CRLF differently.
                 // Match the actual text immediately before the current caret.
-                let range = readable(prefix.FindText(&BSTR::from(previous), true, false).or_else(
-                    |_| prefix.FindText(&BSTR::from(previous.replace('\n', "\r\n")), true, false),
-                ))?;
-                let ends_at_caret = readable(range.CompareEndpoints(
-                    TextPatternRangeEndpoint_End,
-                    &caret,
-                    TextPatternRangeEndpoint_Start,
-                ))? == 0;
-                if contents(readable(range.GetText(-1))?)? != previous {
+                let range = prefix
+                    .FindText(&BSTR::from(previous), true, false)
+                    .or_else(|_| {
+                        prefix.FindText(&BSTR::from(previous.replace('\n', "\r\n")), true, false)
+                    });
+                if let Ok(range) = range {
+                    let exact = readable(range.CompareEndpoints(
+                        TextPatternRangeEndpoint_End,
+                        &caret,
+                        TextPatternRangeEndpoint_Start,
+                    ))? == 0
+                        && contents(readable(range.GetText(-1))?)? == previous;
+                    if exact {
+                        editor.require_focus(self.focus)?;
+                        if range.Select().is_ok()
+                            && self.confirm_selection(expected, deadline).is_ok()
+                        {
+                            return Ok(());
+                        }
+                    }
+                }
+                if !editor.is_chromium() {
                     return Err(EDIT_CHANGED.into());
                 }
-                if ends_at_caret {
-                    editor.require_focus(self.focus)?;
-                    readable(range.Select())?;
-                } else {
-                    if !editor.is_chromium() {
-                        return Err(EDIT_CHANGED.into());
-                    }
-                    // Chromium sometimes finds the exact suffix at a UIA position
-                    // different from the displayed caret. Select from the real
-                    // caret only when the original text and selection still match.
-                    editor.wait_for_input(self.focus, deadline)?;
-                    self.check_selection(&expected.after_writing(previous))?;
-                    editor.check_input(self.focus, deadline)?;
-                    let mut keys = vec![virtual_key(VK_SHIFT, 0)];
-                    for _ in previous.graphemes(true) {
-                        keys.push(virtual_key(VK_LEFT, KEYEVENTF_EXTENDEDKEY));
-                        keys.push(virtual_key(
-                            VK_LEFT,
-                            KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
-                        ));
-                    }
-                    keys.push(virtual_key(VK_SHIFT, KEYEVENTF_KEYUP));
-                    send_inputs(&keys)?;
+                // A Chromium range may report a different caret or ignore Select.
+                // Use the visible caret only if the entire prior snapshot is intact.
+                editor.wait_for_input(self.focus, deadline)?;
+                self.check_selection(&expected.after_writing(previous))?;
+                editor.check_input(self.focus, deadline)?;
+                let mut keys = vec![virtual_key(VK_SHIFT, 0)];
+                for _ in previous.graphemes(true) {
+                    keys.push(virtual_key(VK_LEFT, KEYEVENTF_EXTENDEDKEY));
+                    keys.push(virtual_key(
+                        VK_LEFT,
+                        KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+                    ));
                 }
+                keys.push(virtual_key(VK_SHIFT, KEYEVENTF_KEYUP));
+                send_inputs(&keys)?;
             }
         } else {
             let (buffer, caret, end) = self.native_selection()?;
@@ -248,7 +266,11 @@ impl Editor {
         }
         let check = || expected.map_or(Ok(()), |selection| self.check_selection(selection));
         if let Some(editor) = &self.automation {
-            return editor.insert(self.focus, text, deadline, check);
+            let after = expected.map(|selection| selection.after_writing(text));
+            let verify = after
+                .as_ref()
+                .map(|after| move || self.check_selection(after).is_ok());
+            return editor.insert(self.focus, text, deadline, check, verify);
         }
         let wide: Vec<_> = text
             .replace('\n', "\r\n")
@@ -265,6 +287,7 @@ impl Editor {
 pub(super) struct Composition {
     original: Option<Selection>,
     written: Option<String>,
+    attempted: Option<String>,
     interrupted: Option<String>,
 }
 
@@ -273,6 +296,7 @@ impl Composition {
         Self {
             original: editor.snapshot().ok(),
             written: None,
+            attempted: None,
             interrupted: None,
         }
     }
@@ -297,9 +321,10 @@ impl Composition {
             editor.check_selection(original)?;
             (text, original.clone())
         };
+        self.attempted = Some(text.to_owned());
         editor.write(replacement, deadline, Some(&expected))?;
         editor.confirm_selection(&original.after_writing(text), deadline)?;
-        self.written = Some(text.to_owned());
+        self.written = self.attempted.take();
         Ok(())
     }
 
@@ -309,12 +334,29 @@ impl Composition {
         }
         if self.interrupted.is_none() {
             if let Err(error) = self.update(editor, text, Instant::now() + Duration::from_secs(2)) {
-                // A user edit, changed focus, or unconfirmed write ends our ownership.
-                // Never append the same dictation again on an ambiguous outcome.
+                // Pause previews after an unconfirmed edit. The final write may
+                // resume only if it can reconcile the full target snapshot.
                 self.interrupted = Some(error);
             }
         }
         self.interrupted.clone().map_or(Ok(()), Err)
+    }
+
+    fn reconcile(&mut self, current: &Selection, original: Selection) -> bool {
+        // An unacknowledged write may have left the old text or the entire
+        // attempted update. Both need to match with their original surroundings.
+        if let Some(attempted) = self
+            .attempted
+            .take()
+            .filter(|attempted| *current == original.after_writing(attempted))
+        {
+            self.written = Some(attempted);
+            return true;
+        }
+        self.written.as_ref().map_or_else(
+            || *current == original,
+            |written| *current == original.after_writing(written),
+        )
     }
 
     pub(super) fn finish(
@@ -324,7 +366,14 @@ impl Composition {
         deadline: Instant,
     ) -> Result<(), String> {
         if let Some(error) = self.interrupted.take() {
-            return Err(error);
+            if error != UNCONFIRMED_WRITE && error != FOCUS_CHANGED {
+                return Err(error);
+            }
+            let original = self.original.as_ref().ok_or_else(|| error.clone())?;
+            let current = editor.snapshot()?;
+            if !self.reconcile(&current, original.clone()) {
+                return Err(error);
+            }
         }
         if self.original.is_some() {
             self.update(editor, text, deadline)
@@ -336,7 +385,35 @@ impl Composition {
 
 #[cfg(test)]
 mod tests {
-    use super::revision;
+    use super::{revision, Composition, Selection};
+
+    #[test]
+    fn final_write_recovers_only_from_an_exact_known_snapshot() {
+        let original = Selection {
+            before: "开头：".into(),
+            selected: "".into(),
+            after: "。结尾".into(),
+        };
+        for (current, safe, written) in [
+            (original.after_writing("那。"), true, "那。"),
+            (original.after_writing("那你继续"), true, "那你继续"),
+            (original.after_writing("那你"), false, "那。"),
+            (
+                original.after_writing("那你继续").with_selection("。"),
+                false,
+                "那。",
+            ),
+        ] {
+            let mut composition = Composition {
+                original: Some(original.clone()),
+                written: Some("那。".into()),
+                attempted: Some("那你继续".into()),
+                interrupted: Some("无法确认目标已写入".into()),
+            };
+            assert_eq!(composition.reconcile(&current, original.clone()), safe);
+            assert_eq!(composition.written.as_deref(), Some(written));
+        }
+    }
 
     #[test]
     fn grows_revises_or_shortens_the_original_hypothesis() {

@@ -22,7 +22,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     STATE_SYSTEM_READONLY,
 };
 
-const FOCUS_CHANGED: &str = "输入焦点已改变，本次转写已保留。";
+const UNCONFIRMED_WRITE: &str = "无法确认目标已写入，请核对输入框和转写。";
+const FOCUS_CHANGED: &str = "输入焦点已改变。";
 const UNSUPPORTED: &str = "此输入框无法安全地插入转写，请复制结果。";
 const NO_EDITOR: &str = "没有找到可写的输入框。请点一下聊天输入框，再启动听写。";
 
@@ -131,15 +132,22 @@ enum EditRequest {
     Final {
         text: String,
         deadline: Instant,
-        reply: mpsc::SyncSender<Result<(), String>>,
+        reply: mpsc::SyncSender<FinalDelivery>,
     },
+}
+
+enum FinalDelivery {
+    TargetChanged,
+    Finished(Result<(), String>),
 }
 
 #[derive(Clone)]
 pub struct DictationTarget {
+    focus: Focus,
     writer: mpsc::Sender<EditRequest>,
     sequence: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
+    initialized: Arc<AtomicBool>,
     issue: Arc<Mutex<Option<String>>>,
 }
 
@@ -149,28 +157,19 @@ pub enum Foreground {
 }
 
 impl DictationTarget {
-    pub fn capture() -> Option<Self> {
-        let (target, ready) = Self::capture_field(Focus::current()?)?;
-        ready.recv_timeout(Duration::from_secs(4)).ok()?;
-        Some(target)
-    }
-
     pub fn capture_foreground() -> Foreground {
         let (own, focus) = foreground_focus();
         if own {
             Foreground::Speaky
         } else {
-            Foreground::External(
-                focus
-                    .and_then(Self::capture_field)
-                    .map(|(target, _)| target),
-            )
+            Foreground::External(focus.and_then(Self::capture_field))
         }
     }
 
-    fn capture_field(focus: Focus) -> Option<(Self, mpsc::Receiver<()>)> {
+    fn capture_field(focus: Focus) -> Option<Self> {
         let (writer, incoming) = mpsc::channel::<EditRequest>();
-        let (ready, capture) = mpsc::sync_channel(1);
+        let initialized = Arc::new(AtomicBool::new(false));
+        let worker_initialized = initialized.clone();
         let sequence = Arc::new(AtomicU64::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let latest = sequence.clone();
@@ -208,7 +207,7 @@ impl DictationTarget {
                 };
                 let editor = live::Editor::new(focus, automation);
                 let mut composition = live::Composition::capture(&editor);
-                let _ = ready.send(());
+                worker_initialized.store(true, Ordering::Release);
                 for request in incoming {
                     match request {
                         EditRequest::Preview { sequence, text } => {
@@ -226,22 +225,30 @@ impl DictationTarget {
                             deadline,
                             reply,
                         } => {
-                            let _ = reply.send(composition.finish(&editor, &text, deadline));
+                            let result = match editor.require_focus() {
+                                Ok(()) => FinalDelivery::Finished(
+                                    composition.finish(&editor, &text, deadline),
+                                ),
+                                Err(error) if error == FOCUS_CHANGED => {
+                                    FinalDelivery::TargetChanged
+                                }
+                                Err(error) => FinalDelivery::Finished(Err(error)),
+                            };
+                            let _ = reply.send(result);
                             break;
                         }
                     }
                 }
             })
             .ok()?;
-        Some((
-            Self {
-                writer,
-                sequence,
-                stopped,
-                issue,
-            },
-            capture,
-        ))
+        Some(Self {
+            focus,
+            writer,
+            sequence,
+            stopped,
+            initialized,
+            issue,
+        })
     }
 
     pub fn delivery_issue(&self) -> Option<String> {
@@ -263,10 +270,33 @@ impl DictationTarget {
         self.stopped.store(true, Ordering::Release);
     }
 
-    pub fn insert(&self, text: &str) -> Result<(), String> {
+    pub fn deliver_final(previous: Option<&Self>, text: &str) -> Result<bool, String> {
         if text.is_empty() || text.contains('\0') {
             return Err("没有可写入的有效文本。".into());
         }
+        let (own, focus) = foreground_focus();
+        if own {
+            return Ok(false);
+        }
+        let focus = focus.ok_or(NO_EDITOR)?;
+        if let Some(previous) = previous.filter(|previous| previous.focus == focus) {
+            match previous.insert(text) {
+                Ok(FinalDelivery::Finished(result)) => return result.map(|()| true),
+                Ok(FinalDelivery::TargetChanged) => {}
+                Err(error) if previous.initialized.load(Ordering::Acquire) => return Err(error),
+                // The original field failed capture before it could receive any preview.
+                Err(_) => {}
+            }
+        }
+
+        let target = Self::capture_field(focus).ok_or(NO_EDITOR)?;
+        match target.insert(text)? {
+            FinalDelivery::Finished(result) => result.map(|()| true),
+            FinalDelivery::TargetChanged => Err(FOCUS_CHANGED.into()),
+        }
+    }
+
+    fn insert(&self, text: &str) -> Result<FinalDelivery, String> {
         self.stop_preview();
         let (reply, result) = mpsc::sync_channel(1);
         // A preview already writing to the editor must complete before the final replacement.
@@ -284,7 +314,7 @@ impl DictationTarget {
         result.recv_timeout(Duration::from_secs(7)).map_err(|_| {
             self.delivery_issue()
                 .unwrap_or_else(|| UNSUPPORTED.to_owned())
-        })?
+        })
     }
 }
 
@@ -448,6 +478,40 @@ impl AutomationEditor {
             .is_ok_and(|id| id.to_string().eq_ignore_ascii_case("Chrome"))
     }
 
+    // Codex exposes the paragraph's CSS placeholder and trailing <br> as
+    // the value of an empty editor. A matching string alone could be a real draft.
+    fn displays_placeholder(&self, document: &str) -> bool {
+        let Some(label) = document.strip_suffix('\n').filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        unsafe {
+            let matches = || -> Option<bool> {
+                let class = self.field.CurrentClassName().ok()?.to_string();
+                if !class.split_ascii_whitespace().any(|s| s == "ProseMirror")
+                    || self.field.CurrentName().ok()?.to_string() != label
+                {
+                    return Some(false);
+                }
+                let walker = self.client.RawViewWalker().ok()?;
+                let paragraph = walker.GetFirstChildElement(&self.field).ok()?;
+                let class = paragraph.CurrentClassName().ok()?.to_string();
+                if paragraph.CurrentControlType().ok()? != UIA_GroupControlTypeId
+                    || !class.split_ascii_whitespace().any(|s| s == "placeholder")
+                    || !class
+                        .split_ascii_whitespace()
+                        .any(|s| s == "before:composer-placeholder")
+                {
+                    return Some(false);
+                }
+                let pattern: IUIAutomationTextPattern =
+                    self.field.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
+                let span = pattern.RangeFromChild(&paragraph).ok()?;
+                Some(contents(span.GetText(-1).ok()?).ok()? == document)
+            };
+            matches() == Some(true)
+        }
+    }
+
     fn text_value(&self) -> Result<String, String> {
         unsafe {
             if let Ok(value) = self
@@ -532,19 +596,31 @@ impl AutomationEditor {
         text: &str,
         deadline: Instant,
         check_position: impl Fn() -> Result<(), String>,
+        confirm_composition: Option<impl Fn() -> bool>,
     ) -> Result<(), String> {
         self.wait_for_input(focus, deadline)?;
-        let clipboard = if text.contains('\n') || text.contains('\t') {
-            Some(if self.is_chromium() {
+        let chromium = self.is_chromium();
+        let needs_paste = text.contains('\n') || text.contains('\t');
+        let clipboard = if needs_paste {
+            Some(if chromium {
                 clipboard::TemporaryText::for_chromium(text, deadline)?
             } else {
                 clipboard::TemporaryText::new(text, deadline)?
             })
+        } else if !chromium {
+            // Custom editors can ignore VK_PACKET. Prefer standard paste, but
+            // keep Unicode input available when the clipboard cannot be saved.
+            clipboard::TemporaryText::new(text, deadline).ok()
         } else {
             None
         };
-        let before = self.text_value()?;
-        let expected = self.edit_expectation(&before, text);
+        let expected_value = if confirm_composition.is_none() {
+            let before = self.text_value()?;
+            let expected = self.edit_expectation(&before, text);
+            Some((before, expected))
+        } else {
+            None
+        };
         self.check_input(focus, deadline)?;
         check_position()?;
         if let Some(clipboard) = &clipboard {
@@ -558,25 +634,40 @@ impl AutomationEditor {
         } else {
             send_inputs(&unicode_packets(text)?)?;
         }
-        let mut observed = false;
+        let mut result = Err(UNCONFIRMED_WRITE.into());
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
-            if self.require_writable().is_err() {
+            if let Err(error) = self
+                .require_focus(focus)
+                .and_then(|()| self.require_writable())
+            {
+                result = Err(error);
                 break;
             }
-            if self.saw_edit(&before, text, expected.as_ref()) {
-                observed = true;
+            if confirm_composition.as_ref().map_or_else(
+                || {
+                    expected_value.as_ref().is_some_and(|(before, expected)| {
+                        self.saw_edit(before, text, expected.as_ref())
+                    })
+                },
+                |confirm| confirm(),
+            ) {
+                result = Ok(());
                 break;
             }
         }
         if let Some(clipboard) = clipboard {
-            clipboard.restore()?;
+            let restored = clipboard.restore();
+            if result.is_ok()
+                || result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error: &String| error == UNCONFIRMED_WRITE)
+            {
+                restored?;
+            }
         }
-        if observed {
-            Ok(())
-        } else {
-            Err("无法确认目标已写入，请核对输入框和转写。".into())
-        }
+        result
     }
 }
 

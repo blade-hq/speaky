@@ -51,6 +51,7 @@ pub struct Pending {
     path: PathBuf,
     wav: Vec<u8>,
     target: Option<DictationTarget>,
+    external: bool,
     config: Config,
 }
 
@@ -104,7 +105,7 @@ pub fn start(config: Config, old: Option<PathBuf>, external: bool, updates: Upda
         None
     };
     thread::spawn(move || {
-        if let Err(error) = record(config, old, target, &updates) {
+        if let Err(error) = record(config, old, target, external, &updates) {
             updates.send(Event::Done(error, rows()));
         }
     });
@@ -114,6 +115,7 @@ fn record(
     config: Config,
     old: Option<PathBuf>,
     target: Option<DictationTarget>,
+    external: bool,
     updates: &Updates,
 ) -> Result<(), String> {
     let asr = &config.core.asr;
@@ -211,6 +213,7 @@ fn record(
             path,
             wav,
             target,
+            external,
             config,
         },
         updates,
@@ -239,6 +242,7 @@ fn finish(pending: Pending, updates: &Updates) {
             pending.path,
             &pending.wav,
             pending.target,
+            pending.external,
             updates,
         );
     }
@@ -246,7 +250,7 @@ fn finish(pending: Pending, updates: &Updates) {
 
 pub fn retranscribe(config: Config, path: PathBuf, updates: Updates) {
     thread::spawn(move || match fs::read(&path) {
-        Ok(wav) => publish_transcript(&config, path, &wav, None, &updates),
+        Ok(wav) => publish_transcript(&config, path, &wav, None, false, &updates),
         Err(error) => updates.send(Event::TranscriptionFailed(path, error.to_string(), rows())),
     });
 }
@@ -256,6 +260,7 @@ fn publish_transcript(
     path: PathBuf,
     wav: &[u8],
     target: Option<DictationTarget>,
+    external: bool,
     updates: &Updates,
 ) {
     let result =
@@ -265,9 +270,15 @@ fn publish_transcript(
         });
     match result {
         Ok(text) => {
-            let status = match target.and_then(|target| target.insert(&text).err()) {
-                Some(error) => format!("转写已保存，可在历史中复制。{error}"),
-                None => "转写已保存。".into(),
+            let delivery = if external {
+                DictationTarget::deliver_final(target.as_ref(), &text)
+            } else {
+                Ok(false)
+            };
+            let status = match delivery {
+                Ok(true) => "已输入到当前输入框。".into(),
+                Ok(false) => "转写已保存。".into(),
+                Err(error) => format!("转写已保存，可在历史中复制。{error}"),
             };
             updates.send(Event::Done(status, rows()));
         }
