@@ -758,7 +758,12 @@ impl Speaky {
                         let status = mac_target.map_or(status, |target| {
                             match target.and_then(|target| target.insert(&text, cx)) {
                                 Ok(notice) => notice.into(),
-                                Err(error) => format!("{error} 转写已保存，可在听写或历史中复制。"),
+                                Err(error) => {
+                                    if error == mac_dictation::ACCESSIBILITY {
+                                        mac_dictation::request_access();
+                                    }
+                                    format!("{error} 转写已保存，可在听写或历史中复制。")
+                                }
                             }
                         });
                         view.result = Some((history::Target::Draft(completed_draft), text));
