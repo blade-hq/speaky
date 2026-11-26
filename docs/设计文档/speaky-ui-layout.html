@@ -1,0 +1,3028 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Speaky 首页布局（对标 Typeless）</title>
+<style>
+  :root {
+    --desk-bg: #0c0c0e;
+    --win-bg: #161617;
+    --sidebar-bg: #222224;
+    --card-bg: #27272a;
+    --card-soft: #202022;
+    --card-hover: #2e2e32;
+    --ink: #f4f4f6;
+    --ink-2: #d4d4d8;
+    --muted: #8e8e96;
+    --subtle: #66666e;
+    --border: rgba(255, 255, 255, 0.075);
+    --border-strong: rgba(255, 255, 255, 0.14);
+    --key-bg: #2f2f33;
+    --key-border: rgba(255, 255, 255, 0.14);
+    --accent: #6889ff;
+    --accent-soft: rgba(104, 137, 255, 0.18);
+    --accent-hover: #7c9aff;
+    --ok: #46c88a;
+    --ok-soft: rgba(70, 200, 138, 0.15);
+    --warn: #f0b24a;
+    --warn-soft: rgba(240, 178, 74, 0.16);
+    --err: #ef6461;
+    --err-soft: rgba(239, 100, 97, 0.18);
+    --dot-color: rgba(255, 255, 255, 0.085);
+    --heat-0: #333337;
+    --heat-1: #303f6b;
+    --heat-2: #3f5aa8;
+    --heat-3: #5778e8;
+    --heat-4: #799aff;
+    --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+
+  /* Optional Light Theme Preview */
+  body.light {
+    --desk-bg: #dfe3df;
+    --win-bg: #f5f5f2;
+    --sidebar-bg: #eceee9;
+    --card-bg: #ffffff;
+    --card-soft: #ffffff;
+    --card-hover: #f3f6f3;
+    --ink: #1e2722;
+    --ink-2: #35423b;
+    --muted: #5d6c64;
+    --subtle: #829189;
+    --border: rgba(30, 39, 34, 0.1);
+    --border-strong: rgba(30, 39, 34, 0.18);
+    --key-bg: #f0f2ee;
+    --key-border: rgba(30, 39, 34, 0.16);
+    --accent: #285848;
+    --accent-soft: rgba(40, 88, 72, 0.13);
+    --accent-hover: #1f473a;
+    --ok: #247a51;
+    --ok-soft: rgba(36, 122, 81, 0.12);
+    --warn: #a06410;
+    --warn-soft: rgba(160, 100, 16, 0.12);
+    --err: #b83c2f;
+    --err-soft: rgba(184, 60, 47, 0.13);
+    --dot-color: rgba(30, 39, 34, 0.09);
+    --heat-0: #e7ece8;
+    --heat-1: #bed8c9;
+    --heat-2: #84b79e;
+    --heat-3: #4c8c71;
+    --heat-4: #285848;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    font-family: var(--font-sans);
+    color: var(--ink);
+    background: radial-gradient(circle at 30% 10%, #1d1d22 0%, var(--desk-bg) 70%);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  body.light {
+    background: radial-gradient(circle at 20% 10%, #eef1ec 0%, var(--desk-bg) 70%);
+  }
+
+  button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  input, select, textarea { font-family: inherit; color: inherit; }
+
+  /* ===== Prototype Top Control Bar ===== */
+  .proto-bar {
+    height: 44px;
+    padding: 0 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: rgba(24, 24, 27, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    font-size: 12px;
+    color: #a1a1aa;
+    user-select: none;
+  }
+  body.light .proto-bar {
+    background: rgba(255, 255, 255, 0.78);
+    border-bottom-color: rgba(30,39,34,0.1);
+    color: var(--muted);
+  }
+  .proto-left, .proto-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .proto-badge {
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .seg-mini {
+    display: inline-flex;
+    padding: 2px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.07);
+  }
+  body.light .seg-mini { background: rgba(0,0,0,0.06); }
+  .seg-mini button {
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .seg-mini button.active {
+    background: var(--card-bg);
+    color: var(--ink);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  }
+  .proto-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 27px;
+    padding: 0 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border-strong);
+    background: rgba(255,255,255,0.04);
+    color: var(--ink-2);
+    font-size: 11.5px;
+    font-weight: 500;
+    transition: all 0.14s ease;
+  }
+  .proto-btn:hover { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+
+  /* ===== Desktop Stage & Window ===== */
+  .stage {
+    height: calc(100vh - 44px);
+    padding: 16px 22px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .app-window {
+    width: min(1160px, 100%);
+    height: min(745px, 100%);
+    background: var(--win-bg);
+    border-radius: 16px;
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset;
+    display: flex;
+    overflow: hidden;
+    position: relative;
+  }
+  body.light .app-window {
+    box-shadow: 0 24px 64px rgba(20,32,26,0.16);
+  }
+
+  /* ===== LEFT SIDEBAR (Typeless Floating Inset Panel) ===== */
+  .sidebar {
+    width: 214px;
+    flex-shrink: 0;
+    margin: 9px 0 9px 9px;
+    border-radius: 13px;
+    background: var(--sidebar-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 14px 12px 12px;
+    user-select: none;
+  }
+
+  .traffic-lights {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 4px 18px;
+  }
+  .traffic-lights.hidden { display: none; }
+  .tl { width: 12px; height: 12px; border-radius: 50%; }
+  .tl.red { background: #ff5f57; }
+  .tl.yellow { background: #febc2e; }
+  .tl.green { background: #28c840; }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 0 6px 20px;
+  }
+  .brand-name {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .brand-pill {
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .nav-group { display: flex; flex-direction: column; gap: 4px; }
+
+  .nav-item {
+    height: 38px;
+    padding: 0 12px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--muted);
+    transition: all 0.14s ease;
+  }
+  .nav-item:hover { background: rgba(255,255,255,0.05); color: var(--ink); }
+  body.light .nav-item:hover { background: rgba(0,0,0,0.04); }
+  .nav-item.active {
+    background: rgba(255,255,255,0.09);
+    color: var(--ink);
+    font-weight: 600;
+  }
+  body.light .nav-item.active {
+    background: #dcebe1;
+    color: #285848;
+  }
+  .nav-badge {
+    margin-left: auto;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--warn-soft);
+    color: var(--warn);
+    font-size: 11px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sidebar-spacer { flex: 1; }
+
+  /* Optional dismissible status pill above guide (mirrors Typeless "获取移动应用" pill) */
+  .sidebar-promo {
+    position: relative;
+    margin-bottom: 10px;
+    height: 40px;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink-2);
+    transition: all 0.15s ease;
+  }
+  body.light .sidebar-promo { background: #fff; }
+  .sidebar-promo:hover { border-color: var(--accent); color: var(--ink); }
+  .promo-close {
+    position: absolute;
+    top: -6px;
+    right: -2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #3a3a40;
+    color: #d4d4d8;
+    font-size: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* AGENTS.md 硬性约束：左下角倒数第二行必须保留「进入引导」按钮（对齐 Typeless「添加成员」行） */
+  .sidebar-guide-row {
+    height: 38px;
+    padding: 0 10px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--ink-2);
+    margin-bottom: 6px;
+    transition: all 0.14s ease;
+  }
+  .sidebar-guide-row:hover { background: rgba(255,255,255,0.06); color: var(--ink); }
+  body.light .sidebar-guide-row:hover { background: rgba(0,0,0,0.05); }
+
+  /* Bottom Icon Dock (Exact Typeless bottom bar!) */
+  .sidebar-dock {
+    padding: 8px 6px 2px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .dock-right { display: flex; align-items: center; gap: 4px; }
+  .dock-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    position: relative;
+    transition: all 0.14s ease;
+  }
+  .dock-btn:hover { background: rgba(255,255,255,0.08); color: var(--ink); }
+  body.light .dock-btn:hover { background: rgba(0,0,0,0.06); }
+  .dock-btn.active { background: var(--accent-soft); color: var(--accent); }
+  .dock-dot {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+  }
+  .dock-dot.warn { background: var(--warn); }
+
+  /* ===== MAIN AREA ===== */
+  .main-col {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+
+  .win-chrome {
+    height: 30px;
+    display: none;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 10px;
+    gap: 2px;
+  }
+  .win-chrome.show { display: flex; }
+  .win-ctl { width: 32px; height: 22px; border-radius: 5px; color: var(--muted); font-size: 12px; }
+  .win-ctl:hover { background: rgba(255,255,255,0.08); }
+
+  .page-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 26px 26px 24px 28px;
+  }
+  .page { display: none; animation: fadeIn 0.16s ease; }
+  .page.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* ===== HOME PAGE (Typeless Exact Structure) ===== */
+  .hero-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 22px;
+  }
+
+  .hero-title {
+    font-size: 38px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1.12;
+    color: var(--ink);
+  }
+
+  .hero-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* Collapsible Live Dictation Bar (Appears cleanly when recording in-app) */
+  .live-strip {
+    display: none;
+    margin-bottom: 18px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: var(--card-bg);
+    border: 1px solid rgba(239, 100, 97, 0.4);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    flex-direction: column;
+    gap: 10px;
+  }
+  .live-strip.show { display: flex; }
+  .live-strip-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .live-wave {
+    flex: 1;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .live-wave span {
+    flex: 1;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--err);
+    transition: height 0.08s ease;
+  }
+  .live-preview-text {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--ink);
+    padding: 8px 12px;
+    border-radius: 9px;
+    background: rgba(0,0,0,0.22);
+  }
+  body.light .live-preview-text { background: #f5f5f2; }
+
+  /* Two-Column Home Body: Center Insights + Right Utility Rail */
+  .home-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 232px;
+    gap: 20px;
+    align-items: start;
+  }
+
+  /* Center Insights Area with Typeless Dot Matrix Backdrop */
+  .insights-zone {
+    position: relative;
+    padding: 4px 10px 14px 4px;
+    background-image: radial-gradient(var(--dot-color) 1.1px, transparent 1.1px);
+    background-size: 14px 14px;
+    border-radius: 18px;
+  }
+
+  .insights-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    padding: 0 2px;
+  }
+  .insights-title {
+    font-size: 19px;
+    font-weight: 600;
+    color: var(--ink-2);
+    letter-spacing: -0.01em;
+  }
+
+  .pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 13px;
+    border-radius: 999px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-strong);
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink-2);
+    transition: all 0.14s ease;
+  }
+  .pill-btn:hover { background: var(--card-hover); color: var(--ink); border-color: rgba(255,255,255,0.24); }
+  .pill-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  .pill-btn.primary:hover { background: var(--accent-hover); }
+  .pill-btn.danger {
+    background: var(--err);
+    border-color: var(--err);
+    color: #fff;
+    font-weight: 600;
+  }
+
+  /* 2x2 KPI Cards */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 13px;
+    margin-bottom: 13px;
+  }
+
+  .kpi-card {
+    padding: 20px 22px;
+    border-radius: 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: border-color 0.15s ease;
+  }
+  .kpi-card:hover { border-color: var(--border-strong); }
+
+  .kpi-val {
+    font-size: 29px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi-unit {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--ink-2);
+    margin-left: 3px;
+    margin-right: 4px;
+  }
+  .kpi-label {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* Heatmap Card */
+  .heatmap-card {
+    padding: 20px 22px 18px;
+    border-radius: 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .streak-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .streak-val {
+    font-size: 26px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.15;
+  }
+  .streak-label {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .heat-grid-wrap {
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+  }
+  .heat-days {
+    display: grid;
+    grid-template-rows: repeat(7, 1fr);
+    gap: 5px;
+    font-size: 10.5px;
+    color: var(--subtle);
+    align-items: center;
+    padding-right: 2px;
+  }
+  .heat-cells {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(20, 1fr);
+    grid-template-rows: repeat(7, 1fr);
+    gap: 5px;
+  }
+  .hcell {
+    aspect-ratio: 1;
+    border-radius: 4px;
+    background: var(--heat-0);
+    transition: transform 0.12s ease;
+  }
+  .hcell:hover { transform: scale(1.25); }
+  .hcell.l1 { background: var(--heat-1); }
+  .hcell.l2 { background: var(--heat-2); }
+  .hcell.l3 { background: var(--heat-3); }
+  .hcell.l4 { background: var(--heat-4); }
+  .hcell.future { background: transparent; border: 1px solid rgba(255,255,255,0.06); }
+  body.light .hcell.future { border-color: rgba(0,0,0,0.08); }
+
+  .heat-months {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--subtle);
+    padding: 0 2px;
+  }
+  .heat-legend {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .heat-legend i {
+    display: inline-block;
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+  }
+
+  /* ===== RIGHT RAIL (Typeless Shortcut Card + Speaky Live Status + Latest Transcript) ===== */
+  .right-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+  }
+
+  .rail-card {
+    padding: 16px 16px;
+    border-radius: 16px;
+    background: var(--card-soft);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+  }
+
+  .shortcut-group {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .shortcut-lbl {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .key-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+  .keycap {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 7px;
+    background: var(--key-bg);
+    border: 1px solid var(--key-border);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+    cursor: pointer;
+    transition: all 0.14s ease;
+  }
+  .keycap:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Live Status Card (Compact, Icon-driven, Zero Text Wall!) */
+  .status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12.5px;
+  }
+  .status-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+  }
+  .status-dot.warn { background: var(--warn); }
+  .status-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--ink-2);
+    font-weight: 500;
+  }
+  .mini-test {
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--muted);
+    flex-shrink: 0;
+    transition: all 0.14s ease;
+  }
+  body.light .mini-test { background: #f2f4f1; }
+  .mini-test:hover { border-color: var(--accent); color: var(--ink); }
+
+  .meter-bar {
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.08);
+    overflow: hidden;
+    margin-top: -6px;
+  }
+  body.light .meter-bar { background: rgba(0,0,0,0.08); }
+  .meter-fill {
+    height: 100%;
+    width: 22%;
+    border-radius: 999px;
+    background: var(--ok);
+    transition: width 0.08s linear;
+  }
+
+  /* Latest Transcript Card (Replaces Typeless hardware ad slot!) */
+  .recent-card {
+    padding: 14px 16px;
+    border-radius: 16px;
+    background: var(--card-soft);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .recent-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .mini-tabs {
+    display: inline-flex;
+    gap: 3px;
+    padding: 2px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.05);
+  }
+  body.light .mini-tabs { background: rgba(0,0,0,0.05); }
+  .mini-tabs button {
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .mini-tabs button.active {
+    background: var(--card-bg);
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .recent-text {
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .recent-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--subtle);
+  }
+  .icon-xs {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+  }
+  .icon-xs:hover { background: rgba(255,255,255,0.08); color: var(--ink); }
+
+  .rail-footer {
+    text-align: right;
+    font-size: 11.5px;
+    color: var(--subtle);
+    padding: 2px 4px 0;
+    line-height: 1.6;
+  }
+  .rail-footer button {
+    color: var(--muted);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    font-size: 11.5px;
+  }
+  .rail-footer button:hover { color: var(--ink); }
+
+  /* ===== SECONDARY PAGES (Matching Typeless Dark Polish) ===== */
+  .sub-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .sub-title { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+
+  .seg-tabs {
+    display: inline-flex;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--card-soft);
+    border: 1px solid var(--border);
+  }
+  .seg-tab {
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .seg-tab.active {
+    background: var(--card-hover);
+    color: var(--ink);
+    font-weight: 600;
+  }
+  body.light .seg-tab.active { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+
+  .stack { display: flex; flex-direction: column; gap: 12px; }
+  .panel {
+    padding: 16px 18px;
+    border-radius: 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+  }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(255,255,255,0.07);
+    color: var(--ink-2);
+  }
+  body.light .tag { background: #eef2ee; color: var(--muted); }
+  .tag.ok { background: var(--ok-soft); color: var(--ok); }
+  .tag.warn { background: var(--warn-soft); color: var(--warn); }
+
+  .layer-box {
+    margin-top: 9px;
+    padding: 11px 13px;
+    border-radius: 10px;
+    background: rgba(0,0,0,0.2);
+    border: 1px solid var(--border);
+  }
+  body.light .layer-box { background: #f7f8f6; }
+  .layer-box.polished { border-color: rgba(104, 137, 255, 0.3); background: rgba(104, 137, 255, 0.07); }
+  body.light .layer-box.polished { border-color: rgba(40, 88, 72, 0.28); background: #f2f8f4; }
+  .layer-kicker {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+
+  .debug-box {
+    margin-top: 10px;
+    padding: 11px 13px;
+    border-radius: 9px;
+    background: #101214;
+    border: 1px solid rgba(70, 200, 138, 0.25);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: #cfd8d3;
+  }
+
+  .setting-row {
+    padding: 13px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .setting-row:first-child { padding-top: 2px; }
+  .setting-row:last-child { border-bottom: none; padding-bottom: 2px; }
+  .setting-title { font-size: 13.5px; font-weight: 600; }
+  .setting-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .switch {
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.16);
+    position: relative;
+    transition: background 0.16s ease;
+    flex-shrink: 0;
+  }
+  body.light .switch { background: #c8d2cb; }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.16s ease;
+  }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { transform: translateX(16px); }
+
+  .input {
+    height: 34px;
+    padding: 0 11px;
+    border-radius: 9px;
+    border: 1px solid var(--border-strong);
+    background: rgba(0,0,0,0.22);
+    font-size: 13px;
+    outline: none;
+  }
+  body.light .input { background: #fff; }
+  .input:focus { border-color: var(--accent); }
+
+  /* ===== TYPELESS-STYLE HISTORY LIST ===== */
+  .hist-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .search-wrap {
+    position: relative;
+    width: 240px;
+    max-width: 100%;
+  }
+  .search-wrap svg {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--subtle);
+    pointer-events: none;
+  }
+  .search-input {
+    width: 100%;
+    height: 34px;
+    padding: 0 28px 0 32px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card-soft);
+    font-size: 12.5px;
+    outline: none;
+  }
+  .search-input:focus { border-color: var(--accent); background: var(--card-bg); }
+  .search-clear {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .search-clear.show { display: inline-flex; }
+  .search-clear:hover { background: rgba(255,255,255,0.08); color: var(--ink); }
+
+  .hist-date-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--subtle);
+    margin: 14px 0 8px 2px;
+  }
+  .hist-date-label:first-child { margin-top: 0; }
+  .hist-group {
+    border-radius: 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    overflow: visible;
+  }
+  .hist-row {
+    position: relative;
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.12s ease;
+  }
+  .hist-row:first-child { border-radius: 14px 14px 0 0; }
+  .hist-row:last-child { border-bottom: none; border-radius: 0 0 14px 14px; }
+  .hist-row:only-child { border-radius: 14px; }
+  .hist-row:hover { background: rgba(255,255,255,0.025); }
+  body.light .hist-row:hover { background: rgba(0,0,0,0.02); }
+
+  .hist-row-main {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr) auto;
+    gap: 14px;
+    align-items: center;
+    cursor: pointer;
+  }
+  .hist-time {
+    font-size: 12px;
+    color: var(--subtle);
+    font-variant-numeric: tabular-nums;
+    padding-top: 2px;
+    white-space: nowrap;
+  }
+  .hist-body { min-width: 0; }
+  .hist-text {
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink);
+    word-break: break-word;
+  }
+  .hist-meta {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 6px;
+    font-size: 11.5px;
+    color: var(--subtle);
+  }
+  .hist-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.45;
+    transition: opacity 0.12s ease;
+  }
+  .hist-row:hover .hist-actions,
+  .hist-row.menu-open .hist-actions { opacity: 1; }
+  .hist-icon-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+  }
+  .hist-icon-btn:hover { background: var(--card-hover); color: var(--ink); }
+
+  .row-menu {
+    position: absolute;
+    right: 14px;
+    top: 44px;
+    min-width: 150px;
+    padding: 5px;
+    border-radius: 11px;
+    background: #232427;
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+    z-index: 40;
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+  }
+  body.light .row-menu { background: #fff; box-shadow: 0 10px 24px rgba(0,0,0,0.12); }
+  .row-menu.open { display: flex; }
+  .row-menu button {
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 7px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    text-align: left;
+  }
+  .row-menu button:hover { background: rgba(255,255,255,0.07); color: var(--ink); }
+  body.light .row-menu button:hover { background: #f2f4f2; }
+  .row-menu button.danger { color: var(--danger); }
+  .row-menu .menu-sep { height: 1px; background: var(--border); margin: 3px 4px; }
+
+  .hist-detail {
+    margin: 10px 0 2px 82px;
+    display: none;
+  }
+  .hist-detail.open { display: block; }
+  .hist-empty {
+    padding: 36px 20px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--muted);
+    border-radius: 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+  }
+
+  /* ===== FLOATING RECORDING OVERLAY (Left X Cancel / Right Check Confirm) ===== */
+  .floating-overlay {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    transform: translateX(-50%) translateY(20px);
+    width: min(490px, calc(100vw - 32px));
+    padding: 12px 15px;
+    border-radius: 20px;
+    background: rgba(22, 25, 34, 0.95);
+    border: 1px solid rgba(158, 170, 255, 0.26);
+    box-shadow: 0 20px 48px rgba(0,0,0,0.55);
+    backdrop-filter: blur(18px);
+    color: #eff2ff;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    opacity: 0;
+    pointer-events: none;
+    transition: all 0.2s ease;
+    z-index: 900;
+  }
+  .floating-overlay.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+  .ov-controls { display: flex; align-items: center; gap: 10px; }
+  .ov-x {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: rgba(255,255,255,0.09); color: #cfd6eb;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ov-x:hover { background: rgba(239, 100, 97, 0.35); color: #fff; }
+  .ov-ok {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: #6889ff; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ov-ok:hover { background: #7f9cff; }
+  .ov-wave { flex: 1; height: 20px; display: flex; align-items: center; gap: 3px; }
+  .ov-wave span { flex: 1; height: 4px; border-radius: 999px; background: rgba(158, 170, 255, 0.72); transition: height 0.08s ease; }
+
+  /* ===== CLIPBOARD FALLBACK TOAST ===== */
+  .clipboard-toast {
+    position: fixed;
+    left: 50%;
+    top: 62px;
+    transform: translateX(-50%) translateY(-12px);
+    padding: 13px 18px;
+    border-radius: 14px;
+    background: #202738;
+    border: 1px solid rgba(131, 228, 208, 0.3);
+    color: #f0f6f7;
+    box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13.5px;
+    font-weight: 500;
+    opacity: 0;
+    pointer-events: none;
+    transition: all 0.2s ease;
+    z-index: 950;
+  }
+  .clipboard-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+
+  /* ===== SPOKENLY-STYLE MODELS & TRANSCRIBE PAGES ===== */
+  .model-top-bar {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .model-main-tabs { display: flex; gap: 20px; }
+  .model-main-tab {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--subtle);
+    padding-bottom: 8px;
+    position: relative;
+  }
+  .model-main-tab.active { color: var(--ink); }
+  .model-main-tab.active::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: -11px;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  .model-source-tabs { display: flex; gap: 16px; }
+  .model-source-tab {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    padding-bottom: 8px;
+    position: relative;
+  }
+  .model-source-tab.active { color: var(--ink); font-weight: 600; }
+  .model-source-tab.active::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: -11px;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+
+  .model-table {
+    border-radius: 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .model-thead, .model-row {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1.8fr) 92px 92px 136px;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 16px;
+  }
+  .model-thead {
+    font-size: 11.5px;
+    color: var(--subtle);
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.015);
+  }
+  .model-row {
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .model-row:last-child { border-bottom: none; }
+  .model-row:hover { background: rgba(255,255,255,0.025); }
+  .model-row.selected { background: rgba(104, 137, 255, 0.11); }
+  body.light .model-row.selected { background: rgba(40, 88, 72, 0.08); }
+  .radio-dot {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 1.5px solid var(--border-strong);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .model-row.selected .radio-dot { border-color: var(--accent); background: var(--accent); }
+  .model-row.selected .radio-dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #fff; }
+  .model-info { display: flex; align-items: flex-start; gap: 11px; min-width: 0; }
+  .model-icon {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: transparent;
+    border: none;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .model-icon svg, .dl-icon svg { width: 100%; height: 100%; display: block; }
+  .model-name-line { display: flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; }
+  .model-badge {
+    padding: 1px 6px; border-radius: 5px;
+    font-size: 10.5px; font-weight: 600;
+    background: var(--accent); color: #fff;
+  }
+  .model-desc { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+  .model-inline-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+  .model-link-btn { font-size: 12px; color: var(--accent); font-weight: 500; }
+  .model-link-btn:hover { text-decoration: underline; }
+  .signal-cell { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .signal-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+  .signal-bars i { width: 2.5px; border-radius: 1px; background: rgba(255,255,255,0.16); display: block; }
+  body.light .signal-bars i { background: rgba(0,0,0,0.12); }
+  .signal-bars i.on { background: var(--ink-2); }
+  .feat-list { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); }
+  .feat-item { display: flex; align-items: center; gap: 6px; }
+  .feat-item::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+
+  .dropzone-stage {
+    min-height: 410px;
+    border-radius: 16px;
+    border: 1.5px dashed var(--border-strong);
+    background: rgba(255,255,255,0.015);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 36px 24px;
+    gap: 12px;
+  }
+  body.light .dropzone-stage { background: #fbfcfa; }
+  .dropzone-stage:hover { border-color: var(--accent); }
+  .dropzone-icon { color: var(--muted); opacity: 0.7; }
+  .dropzone-title { font-size: 16px; font-weight: 600; }
+  .dropzone-formats { font-size: 12px; color: var(--subtle); letter-spacing: 0.02em; }
+  .dropzone-actions { display: flex; gap: 10px; margin-top: 8px; }
+
+  /* ===== ONBOARDING FULL-WINDOW VIEW (Spokenly Immersive Style) ===== */
+  .modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 34%, rgba(255,255,255,0.045), transparent 58%), #18191b;
+    display: none;
+    align-items: stretch;
+    justify-content: center;
+    z-index: 500;
+    padding: 0;
+  }
+  body.light .modal-backdrop {
+    background: radial-gradient(circle at 50% 34%, rgba(40,88,72,0.05), transparent 60%), #f6f7f5;
+  }
+  .modal-backdrop.show { display: flex; }
+  .tour-modal {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    overflow: hidden;
+  }
+  .tour-skip-btn {
+    position: absolute;
+    top: 18px;
+    right: 22px;
+    font-size: 12.5px;
+    color: var(--muted);
+    padding: 5px 11px;
+    border-radius: 8px;
+  }
+  .tour-skip-btn:hover { background: rgba(255,255,255,0.08); color: var(--ink); }
+  .tour-body {
+    flex: 1;
+    padding: 56px 48px 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 22px;
+  }
+  .tour-hero-badge {
+    width: 108px; height: 108px; border-radius: 24px;
+    background: #27282b;
+    border: 1px solid rgba(255,255,255,0.14);
+    box-shadow: 0 16px 38px rgba(0,0,0,0.42);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; position: relative;
+  }
+  body.light .tour-hero-badge { background: #f2f4f2; border-color: rgba(0,0,0,0.08); box-shadow: none; }
+  .tour-hero-check {
+    position: absolute; top: -8px; right: -8px;
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--ok); color: #0f1c14;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 800;
+  }
+  .tour-h1 { font-size: 34px; font-weight: 700; letter-spacing: -0.025em; line-height: 1.25; }
+  .tour-sub { font-size: 16px; color: var(--muted); max-width: 540px; line-height: 1.6; }
+  .tour-cta {
+    height: 46px;
+    padding: 0 34px;
+    border-radius: 999px;
+    background: #eceef2;
+    color: #161719;
+    font-size: 15.5px;
+    font-weight: 600;
+    margin-top: 8px;
+  }
+  .tour-cta:hover { background: #fff; }
+  body.light .tour-cta { background: var(--accent); color: #fff; }
+  .tour-perm-mock {
+    width: 100%; max-width: 480px;
+    padding: 18px 20px; border-radius: 16px;
+    background: rgba(255,255,255,0.045);
+    border: 1px solid var(--border-strong);
+    display: flex; flex-direction: column; gap: 12px;
+    text-align: left;
+  }
+  body.light .tour-perm-mock { background: #f6f7f5; }
+  .tour-perm-row {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 15px; padding: 11px 14px; border-radius: 10px;
+    background: rgba(255,255,255,0.035);
+  }
+  .tour-practice-box {
+    width: 100%; max-width: 520px;
+    padding: 20px 24px; border-radius: 16px;
+    background: rgba(255,255,255,0.055);
+    border: 1px solid var(--border-strong);
+    font-size: 18px; color: var(--ink-2);
+  }
+  .tour-inline-links { display: flex; align-items: center; gap: 22px; font-size: 15px; color: var(--muted); }
+  .tour-inline-links button:hover { color: var(--ink); }
+  .tour-autostart {
+    display: inline-flex; align-items: center; gap: 20px;
+    padding: 14px 22px; border-radius: 14px;
+    background: rgba(255,255,255,0.055);
+    border: 1px solid var(--border-strong);
+    font-size: 15px;
+  }
+  .tour-foot {
+    padding: 14px 24px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .tour-dots { display: flex; align-items: center; gap: 6px; margin: 0 auto; }
+  .tour-dot { width: 6px; height: 6px; border-radius: 999px; background: rgba(255,255,255,0.22); transition: all 0.16s ease; }
+  body.light .tour-dot { background: rgba(0,0,0,0.16); }
+  .tour-dot.active { width: 20px; background: #fff; }
+  body.light .tour-dot.active { background: var(--accent); }
+  .tour-dot.done { background: var(--ok); }
+
+  /* ===== MODEL DOWNLOAD PROGRESS SHEET ===== */
+  .dl-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.62);
+    backdrop-filter: blur(6px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 520;
+    padding: 20px;
+  }
+  .dl-backdrop.show { display: flex; }
+  .dl-card {
+    width: 440px;
+    max-width: 100%;
+    padding: 36px 32px 28px;
+    border-radius: 20px;
+    background: #1b1c1e;
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 14px;
+  }
+  body.light .dl-card { background: #fff; box-shadow: 0 20px 50px rgba(0,0,0,0.16); }
+  .dl-close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    color: var(--ink-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+  }
+  body.light .dl-close { background: #f0f2f0; }
+  .dl-close:hover { background: rgba(255,255,255,0.16); color: var(--ink); }
+  .dl-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 16px;
+    background: transparent;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .dl-title { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+  .dl-bar-wrap { width: 100%; margin-top: 4px; }
+  .dl-bar {
+    width: 100%;
+    height: 7px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.12);
+    overflow: hidden;
+  }
+  body.light .dl-bar { background: #e6eae6; }
+  .dl-bar-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: #d9dde6;
+    transition: width 0.14s linear;
+  }
+  body.light .dl-bar-fill { background: var(--accent); }
+  .dl-stats {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12.5px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    margin-top: 9px;
+  }
+  .dl-hint { font-size: 12.5px; color: var(--subtle); margin-top: 6px; }
+  .dl-try-box { width: 100%; display: none; flex-direction: column; gap: 12px; margin-top: 2px; }
+  .dl-try-box.show { display: flex; }
+  .dl-shortcut-card {
+    width: 100%;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.045);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  body.light .dl-shortcut-card { background: #f5f7f5; }
+  .dl-shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .dl-shortcut-row:last-child { border-bottom: none; }
+  .dl-shortcut-left { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .dl-shortcut-right { font-size: 12.5px; color: var(--muted); }
+  .dl-try-input {
+    width: 100%;
+    height: 86px;
+    padding: 11px 13px;
+    border-radius: 12px;
+    border: 1.5px solid var(--accent);
+    background: rgba(0,0,0,0.22);
+    font-size: 13.5px;
+    line-height: 1.55;
+    resize: none;
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(104, 137, 255, 0.16);
+  }
+  .dl-try-input:focus { border-color: var(--accent); }
+  .api-form { width: 100%; display: flex; flex-direction: column; gap: 11px; text-align: left; }
+  .api-field { display: flex; flex-direction: column; gap: 5px; }
+  .api-field label { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .api-form-foot { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; }
+  .api-test-msg { font-size: 12px; color: var(--ok); min-height: 18px; text-align: left; width: 100%; }
+
+  .app-toast {
+    position: absolute;
+    right: 20px;
+    bottom: 18px;
+    padding: 9px 14px;
+    border-radius: 10px;
+    background: #2f3138;
+    border: 1px solid var(--border-strong);
+    color: #fff;
+    font-size: 12.5px;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.35);
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+    transition: all 0.18s ease;
+    z-index: 400;
+  }
+  .app-toast.show { opacity: 1; transform: translateY(0); }
+
+  @media (max-width: 940px) {
+    .home-layout { grid-template-columns: 1fr; }
+    .sidebar { width: 176px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== Prototype Bar ===== -->
+<div class="proto-bar">
+  <div class="proto-left">
+    <span class="proto-badge">Speaky × Typeless / Spokenly v4</span>
+    <div class="seg-mini" id="platformSwitch">
+      <button class="active" data-platform="mac">macOS</button>
+      <button data-platform="win">Windows</button>
+    </div>
+    <div class="seg-mini" id="themeSwitch">
+      <button class="active" data-theme="dark">暗色（Typeless）</button>
+      <button data-theme="light">浅色（Speaky 绿）</button>
+    </div>
+  </div>
+  <div class="proto-right">
+    <button class="proto-btn" onclick="toggleOverlayDemo()">演示录音悬浮条</button>
+    <button class="proto-btn" onclick="showClipboardNotice()">演示剪贴板兜底</button>
+    <button class="proto-btn" onclick="openTour(0)">演示首次引导</button>
+  </div>
+</div>
+
+<!-- ===== Main Desktop Window ===== -->
+<div class="stage">
+  <div class="app-window">
+
+    <!-- ===== LEFT SIDEBAR (Typeless Floating Rail) ===== -->
+    <aside class="sidebar">
+      <div class="traffic-lights" id="trafficLights">
+        <span class="tl red"></span>
+        <span class="tl yellow"></span>
+        <span class="tl green"></span>
+      </div>
+
+      <div class="brand">
+        <svg width="24" height="24" viewBox="0 0 64 64" style="flex-shrink:0">
+          <rect x="2" y="2" width="60" height="60" rx="16" fill="#285848"/>
+          <polygon points="19,37 33,42 19,51" fill="#f6fbf5"/>
+          <rect x="13" y="14" width="38" height="31" rx="11" fill="#f6fbf5"/>
+          <rect x="21" y="26" width="4.5" height="8" rx="2.25" fill="#285848"/>
+          <rect x="29.75" y="20.5" width="4.5" height="19" rx="2.25" fill="#285848"/>
+          <rect x="38.5" y="24" width="4.5" height="12" rx="2.25" fill="#285848"/>
+        </svg>
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
+          <span class="brand-name" style="line-height:1.15">Speaky</span>
+          <span style="font-size:11px;color:var(--subtle);line-height:1.1;letter-spacing:0.01em">领铄 · 2612.0.0</span>
+        </div>
+      </div>
+
+      <nav class="nav-group">
+        <button class="nav-item active" data-page="home" onclick="switchPage('home')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          首页
+        </button>
+        <button class="nav-item" data-page="models" onclick="switchPage('models')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+          AI 模型
+        </button>
+        <button class="nav-item" data-page="transcribe" onclick="switchPage('transcribe')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg>
+          转录文件
+        </button>
+        <button class="nav-item" data-page="history" onclick="switchPage('history')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          历史记录
+        </button>
+        <button class="nav-item" data-page="terms" onclick="switchPage('terms')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
+          词典
+        </button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+
+      <!-- AGENTS.md 必守红线：左下角倒数第二行保留「进入引导」按钮 -->
+      <button class="sidebar-guide-row" onclick="openTour(0)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+        进入引导
+      </button>
+
+      <!-- Bottom Row: Settings (keeps「进入引导」on the second-to-last row) -->
+      <button class="nav-item" data-page="settings" onclick="switchPage('settings', 'input')" style="margin-top:2px">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+        设置
+      </button>
+    </aside>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <div class="main-col">
+      <div class="win-chrome" id="winChrome">
+        <button class="win-ctl">—</button>
+        <button class="win-ctl">□</button>
+        <button class="win-ctl">✕</button>
+      </div>
+
+      <div class="page-scroll">
+
+        <!-- ==================== PAGE 1: HOME (Typeless Layout) ==================== -->
+        <section class="page active" id="page-home">
+          <div class="hero-header">
+            <h1 class="hero-title">说话，不要打字</h1>
+            <div class="hero-actions">
+              <button class="pill-btn" id="heroCancelBtn" style="display:none" onclick="cancelInAppRec()" title="取消本次转写并清除预览，但保留原音">
+                ✕ 取消
+              </button>
+              <button class="pill-btn primary" id="heroRecBtn" onclick="toggleInAppRec()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+                开始录音
+              </button>
+            </div>
+          </div>
+
+          <!-- Live Dictation Strip (Expands smoothly when recording in-app) -->
+          <div class="live-strip" id="liveStrip">
+            <div class="live-strip-top">
+              <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600">
+                <span class="status-dot" style="background:var(--err)"></span>
+                <span>边录边转写</span>
+                <span style="font-family:var(--font-mono);color:var(--muted)" id="liveTimer">00:00</span>
+              </div>
+              <div class="live-wave" id="liveWave"></div>
+              <span style="font-size:11.5px;color:var(--muted)">Esc 取消仍保留原音</span>
+            </div>
+            <div class="live-preview-text" id="livePreviewText">正在聆听…</div>
+          </div>
+
+          <!-- Typeless Two-Column Body: Insights (Left/Center) + Utility Rail (Right) -->
+          <div class="home-layout">
+
+            <!-- Center Insights Zone -->
+            <div class="insights-zone">
+              <div class="insights-head">
+                <div class="insights-title">洞察</div>
+              </div>
+
+              <!-- 2x2 KPI Cards -->
+              <div class="kpi-grid">
+                <div class="kpi-card">
+                  <div class="kpi-val" id="kpiWords">128K<span class="kpi-unit">字</span></div>
+                  <div class="kpi-label">口述字数</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-val">62<span class="kpi-unit">小时</span></div>
+                  <div class="kpi-label">节省时间</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-val">182<span class="kpi-unit">每分钟字数</span></div>
+                  <div class="kpi-label">平均口述速度</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-val">17<span class="kpi-unit">小时</span>34<span class="kpi-unit">分钟</span></div>
+                  <div class="kpi-label">总口述时间</div>
+                </div>
+              </div>
+
+              <!-- Activity Heatmap Card -->
+              <div class="heatmap-card">
+                <div class="streak-row">
+                  <div>
+                    <div class="streak-val">152<span class="kpi-unit">天</span></div>
+                    <div class="streak-label">活跃天数</div>
+                  </div>
+                  <div>
+                    <div class="streak-val">23<span class="kpi-unit">天</span></div>
+                    <div class="streak-label">当前连续天数</div>
+                  </div>
+                  <div>
+                    <div class="streak-val">33<span class="kpi-unit">天</span></div>
+                    <div class="streak-label">最长连续天数</div>
+                  </div>
+                </div>
+
+                <div class="heat-grid-wrap">
+                  <div class="heat-days">
+                    <span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span>
+                  </div>
+                  <div class="heat-cells" id="heatCells"></div>
+                </div>
+
+                <div class="heat-months">
+                  <span>‹</span>
+                  <span>八月</span>
+                  <span>九月</span>
+                  <span>十月</span>
+                  <span>十一月</span>
+                  <span>›</span>
+                </div>
+
+                <div class="heat-legend">
+                  <span>更少</span>
+                  <i style="background:var(--heat-1)"></i>
+                  <i style="background:var(--heat-2)"></i>
+                  <i style="background:var(--heat-3)"></i>
+                  <i style="background:var(--heat-4)"></i>
+                  <span>更多</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Rail (Shortcuts + Live Status + Latest Transcript) -->
+            <div class="right-rail">
+              <!-- Card 1: Typeless-style Shortcuts -->
+              <div class="rail-card">
+                <div class="shortcut-group">
+                  <div class="shortcut-lbl">
+                    <span>口述（任意输入框）</span>
+                  </div>
+                  <div class="key-row" id="hotkeyGroup" onclick="switchPage('settings', 'input')">
+                    <span class="keycap">Right Option</span>
+                  </div>
+                </div>
+                <div class="shortcut-group">
+                  <div class="shortcut-lbl"><span>取消转写（保留原音）</span></div>
+                  <div class="key-row">
+                    <span class="keycap" onclick="toggleOverlayDemo()">Esc</span>
+                  </div>
+                </div>
+                <div class="shortcut-group">
+                  <div class="shortcut-lbl"><span>切换推荐语言</span></div>
+                  <div class="key-row">
+                    <span class="keycap" id="langKeycap" onclick="cycleLang()">中文优先</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Card 2: Compact Live Status & 1-Click Tests (AGENTS.md Status Visibility!) -->
+              <div class="rail-card">
+                <div class="recent-head" style="margin-bottom:2px">
+                  <span>运行状态</span>
+                  <button class="mini-test" onclick="runFullCheck()" title="一键检测麦克风、ASR 与改写链路">全链路体检</button>
+                </div>
+                <div class="status-row">
+                  <div class="status-left">
+                    <span class="status-dot" id="permDot"></span>
+                    <span class="status-name" id="permStatusLabel">麦克风 · 辅助功能</span>
+                  </div>
+                  <button class="mini-test" onclick="togglePermDemo()" id="permBtn">已通</button>
+                </div>
+
+                <div class="status-row">
+                  <div class="status-left">
+                    <span class="status-dot"></span>
+                    <span class="status-name" id="micStatusLabel">MacBook Pro 麦</span>
+                  </div>
+                  <button class="mini-test" onclick="testMic()">测麦</button>
+                </div>
+                <div class="meter-bar" title="实时环境音量"><div class="meter-fill" id="homeMeter"></div></div>
+
+                <div class="status-row">
+                  <div class="status-left" style="cursor:pointer" onclick="switchPage('models')">
+                    <span class="status-dot"></span>
+                    <span class="status-name" id="asrStatusLabel">Qwen3-ASR-0.6B · 本地</span>
+                  </div>
+                  <button class="mini-test" onclick="testAsr(this)">测试</button>
+                </div>
+
+                <div class="status-row">
+                  <div class="status-left" style="cursor:pointer" onclick="switchPage('models')">
+                    <span class="status-dot" id="llmDot"></span>
+                    <span class="status-name" id="llmStatusLabel">DeepSeek 改写</span>
+                  </div>
+                  <button class="mini-test" onclick="testLlm(this)">测试</button>
+                </div>
+              </div>
+
+              <!-- Card 3: Latest Transcript Peek (Replaces Hardware Ad) -->
+              <div class="recent-card">
+                <div class="recent-head">
+                  <span>最近转写</span>
+                  <div class="mini-tabs" id="recentLayerTabs">
+                    <button class="active" onclick="setRecentLayer('polished', this)">改写</button>
+                    <button onclick="setRecentLayer('raw', this)">原文</button>
+                  </div>
+                </div>
+                <div class="recent-text" id="recentText" onclick="switchPage('history')">
+                  首页先按 Typeless 的三栏节奏重排，把洞察热力图放中间，右侧收拢快捷键与实时运行状态。
+                </div>
+                <div class="recent-foot">
+                  <span id="recentMeta">0:14 · 已独立留存原音</span>
+                  <div style="display:flex;gap:2px">
+                    <button class="icon-xs" title="播放原音" onclick="showAppToast('正在回放原始录音 0:14')">▶</button>
+                    <button class="icon-xs" title="复制文本" onclick="showAppToast('已复制到剪贴板')">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="rail-footer">
+                <div>领铄 · 2612.0.0</div>
+                <button onclick="switchPage('history')">全部历史记录</button>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- ==================== PAGE 1B: AI MODELS (Unified Open-source + Online) ==================== -->
+        <section class="page" id="page-models">
+          <div class="model-top-bar">
+            <div class="model-main-tabs" id="modelMainTabs">
+              <button class="model-main-tab active" onclick="setModelKind('asr', this)">听写（ASR）</button>
+              <button class="model-main-tab" onclick="setModelKind('llm', this)">AI 处理（改写）</button>
+            </div>
+            <button class="pill-btn primary" style="height:30px;font-size:12px" onclick="openApiModal(null, event)">+ 连接自定义 API</button>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px">
+            <div style="font-size:12.5px;color:var(--muted)" id="modelSubtitle">
+              选择一个听写模型：开源模型下载后即点即用，在线模型配置密钥后即可连接测试。
+            </div>
+            <div id="llmToggleWrap" style="display:none;align-items:center;gap:8px;flex-shrink:0">
+              <span style="font-size:12.5px;color:var(--ink-2)" id="llmToggleLabel">已开启改写</span>
+              <button class="switch on" id="modelsLlmSwitch" onclick="toggleLlm()" title="开启或关闭 AI 处理改写"></button>
+            </div>
+          </div>
+          <div class="model-table" id="modelTable"></div>
+          <div id="asrAdvancedSection" style="margin-top:16px">
+            <button class="pill-btn" style="height:30px;font-size:12px;color:var(--muted)" onclick="toggleAsrAdvanced()" id="asrAdvToggle">高级（离线导入 / 导出） ▾</button>
+            <div class="panel" id="asrAdvPanel" style="display:none;margin-top:10px;padding:14px 16px">
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">导出离线模型包</div>
+                  <div class="setting-sub">将当前已下载的本地模型打包，拷贝到断网电脑即可直接导入使用</div>
+                </div>
+                <button class="pill-btn" onclick="showAppToast('正在导出 Qwen3-ASR-0.6B 离线包…')">导出</button>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-title">导入离线模型包</div>
+                  <div class="setting-sub">在断网环境下选择本地模型包导入，无需联网下载</div>
+                </div>
+                <button class="pill-btn" onclick="showAppToast('请选择本地离线模型包进行导入')">导入</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== PAGE 1C: TRANSCRIBE FILE (Spokenly-style) ==================== -->
+        <section class="page" id="page-transcribe">
+          <div class="sub-head" style="margin-bottom:16px">
+            <div class="sub-title">转录文件</div>
+          </div>
+          <div class="dropzone-stage" onclick="simulateFileTranscribe('产品评审录音_1126.m4a')">
+            <div class="dropzone-icon">
+              <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><polyline points="9 15 12 18 15 15"/></svg>
+            </div>
+            <div class="dropzone-title">拖入音频或视频文件</div>
+            <div class="dropzone-formats">MP3, WAV, M4A, FLAC, OPUS, OGG, MP4, MOV, M4V</div>
+            <div class="dropzone-actions" onclick="event.stopPropagation()">
+              <button class="pill-btn primary" onclick="simulateFileTranscribe('会议纪要_20261126.wav')">选择文件…</button>
+              <button class="pill-btn" onclick="switchPage('home');toggleInAppRec()">录制音频</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== PAGE 2: HISTORY ==================== -->
+        <section class="page" id="page-history">
+          <div class="sub-head" style="margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div class="sub-title">历史记录</div>
+              <span class="tag ok" id="histDebugTag" style="display:none">Debug</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:12.5px;color:var(--muted)">Debug 模式</span>
+              <button class="switch" id="histDebugSwitch" onclick="toggleDebugMode()" title="在历史记录中查看脱敏请求详情"></button>
+            </div>
+          </div>
+
+          <div class="hist-toolbar">
+            <div class="seg-tabs" id="histFilters">
+              <button class="seg-tab active" onclick="filterHist('all', this)">全部</button>
+              <button class="seg-tab" onclick="filterHist('cancelled', this)">待转写</button>
+              <button class="seg-tab" onclick="filterHist('polished', this)">已改写</button>
+              <button class="seg-tab" onclick="filterHist('fallback', this)">仅原文</button>
+            </div>
+            <div class="search-wrap">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <input class="search-input" id="histSearch" placeholder="搜索历史记录…" oninput="onHistSearch(this.value)" />
+              <button class="search-clear" id="histSearchClear" onclick="clearHistSearch()" title="清除搜索">✕</button>
+            </div>
+          </div>
+
+          <div id="historyList"></div>
+        </section>
+
+        <!-- ==================== PAGE 3: DICTIONARY (TERMS) ==================== -->
+        <section class="page" id="page-terms">
+          <div class="sub-head">
+            <div class="sub-title">词典</div>
+            <button class="pill-btn" onclick="showAppToast('已复制词典内容')">复制词表</button>
+          </div>
+          <div style="display:grid;grid-template-columns:1.1fr 0.9fr;gap:16px">
+            <div class="panel stack">
+              <div style="font-size:13px;font-weight:600;color:var(--muted)">手动常用词替换（识别后本地即时生效）</div>
+              <div style="display:flex;gap:8px">
+                <input class="input" id="wrongIn" placeholder="识别错词，如 斯皮基" style="flex:1" />
+                <input class="input" id="rightIn" placeholder="正确写法，如 Speaky" style="flex:1" />
+                <button class="pill-btn primary" onclick="addTerm()">添加</button>
+              </div>
+              <div class="stack" id="termsList" style="gap:7px"></div>
+            </div>
+            <div class="panel stack">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:13px;font-weight:600;color:var(--muted)">改错自动学习</span>
+                <span class="tag ok">持续沉淀</span>
+              </div>
+              <div class="layer-box" style="margin-top:0;display:flex;justify-content:space-between"><span>季皮优爱 → <strong>GPUI</strong></span><span class="tag">6次</span></div>
+              <div class="layer-box" style="margin-top:0;display:flex;justify-content:space-between"><span>麦格派 → <strong>Magpie</strong></span><span class="tag">4次</span></div>
+              <div class="layer-box" style="margin-top:0;display:flex;justify-content:space-between"><span>森斯沃斯 → <strong>SenseVoice</strong></span><span class="tag">3次</span></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== PAGE 4: SETTINGS (Typeless Clean Grouped Layout) ==================== -->
+        <section class="page" id="page-settings">
+          <div class="sub-head" style="margin-bottom:20px">
+            <div class="sub-title">设置</div>
+          </div>
+
+          <div class="stack" style="gap:20px;max-width:740px">
+            <div>
+              <div class="hist-date-label" style="margin-top:0">快捷键</div>
+              <div class="panel">
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">语音输入</div>
+                    <div class="setting-sub">按下开始和停止语音输入</div>
+                  </div>
+                  <span class="keycap" id="settingsKeycap" onclick="showAppToast('按下任意组合键即可更新快捷键')">Right Option</span>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="hist-date-label" style="margin-top:0">语言</div>
+              <div class="panel">
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">推荐识别语言</div>
+                    <div class="setting-sub">提升中英混排或特定语种的识别准确度</div>
+                  </div>
+                  <select class="input" style="height:32px;font-size:12.5px" onchange="document.getElementById('langKeycap').textContent=this.value">
+                    <option>中文优先</option>
+                    <option>自动检测</option>
+                    <option>English</option>
+                    <option>粤语</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="hist-date-label" style="margin-top:0">音频</div>
+              <div class="panel">
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">麦克风</div>
+                    <div class="setting-sub">选择首选麦克风以捕捉你的声音</div>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <select class="input" style="height:32px;font-size:12.5px" onchange="document.getElementById('micStatusLabel').textContent=this.value">
+                      <option>默认麦克风</option>
+                      <option>外接 USB 麦克风</option>
+                      <option>蓝牙耳机麦</option>
+                    </select>
+                    <button class="pill-btn" onclick="testMic()">测试</button>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">交互声音</div>
+                    <div class="setting-sub">为开始/停止等关键操作播放提示音</div>
+                  </div>
+                  <button class="switch on" onclick="this.classList.toggle('on')"></button>
+                </div>
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">语音输入时静音</div>
+                    <div class="setting-sub">录音时自动静音其他活动音频（默认关闭）</div>
+                  </div>
+                  <button class="switch" onclick="this.classList.toggle('on')"></button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="hist-date-label" style="margin-top:0">常规</div>
+              <div class="panel">
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">外观</div>
+                    <div class="setting-sub">选择深色或浅色模式</div>
+                  </div>
+                  <select class="input" style="height:32px;font-size:12.5px" onchange="document.body.classList.toggle('light', this.value==='light')">
+                    <option value="dark">深色</option>
+                    <option value="light">浅色</option>
+                  </select>
+                </div>
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">登录时启动应用</div>
+                    <div class="setting-sub">计算机启动时自动打开 Speaky</div>
+                  </div>
+                  <button class="switch on" onclick="this.classList.toggle('on')"></button>
+                </div>
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">Debug 模式</div>
+                    <div class="setting-sub">在历史记录中查看脱敏后的模型请求详情</div>
+                  </div>
+                  <button class="switch" id="settingsDebugSwitch" onclick="toggleDebugMode()"></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+      <div class="app-toast" id="appToast"></div>
+    </div>
+
+    <!-- ===== ONBOARDING MODAL (Spokenly Immersive Style) ===== -->
+    <div class="modal-backdrop" id="tourBackdrop">
+      <div class="tour-modal">
+        <button class="tour-skip-btn" onclick="closeTour()">跳过</button>
+        <div class="tour-body" id="tourBody"></div>
+        <div class="tour-foot">
+          <button class="pill-btn" id="tourPrev" style="height:28px;font-size:12px" onclick="stepTour(-1)">上一步</button>
+          <div class="tour-dots" id="tourDots">
+            <span class="tour-dot active"></span><span class="tour-dot"></span><span class="tour-dot"></span><span class="tour-dot"></span>
+          </div>
+          <div style="width:62px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== CUSTOM API CONNECTION MODAL ===== -->
+    <div class="dl-backdrop" id="apiBackdrop">
+      <div class="dl-card" style="width:460px;align-items:flex-start;text-align:left;padding:26px 26px 22px">
+        <button class="dl-close" onclick="closeApiModal()" title="关闭">✕</button>
+        <div class="dl-title" id="apiModalTitle" style="font-size:17px">连接自定义模型 API</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:-8px" id="apiModalSub">支持标准 OpenAI 兼容接口，密钥仅保存在本机。</div>
+        <div class="api-form">
+          <div class="api-field" id="apiProtoField">
+            <label>协议类型</label>
+            <select class="input" id="apiProtoIn" onchange="onApiProtoChange()">
+              <option value="auto">自动探测（推荐）</option>
+              <option value="openai">OpenAI 兼容转写（/v1/audio/transcriptions）</option>
+              <option value="funasr">FunASR WebSocket（ws:// / wss://）</option>
+              <option value="whisper-cpp">whisper.cpp 原生 HTTP</option>
+            </select>
+          </div>
+          <div class="api-field">
+            <label>显示名称</label>
+            <input class="input" id="apiNameIn" placeholder="例如：企业内部语音服务" />
+          </div>
+          <div class="api-field">
+            <label>接口地址（Base URL）</label>
+            <input class="input" id="apiUrlIn" placeholder="https://api.example.com/v1" />
+          </div>
+          <div class="api-field">
+            <label>API Key（可选）</label>
+            <input class="input" id="apiKeyIn" type="password" placeholder="sk-••••••••••••••••" />
+          </div>
+          <div class="api-field" id="apiModelField">
+            <label>模型标识（Model）</label>
+            <input class="input" id="apiModelIn" placeholder="qwen3-asr-0.6b" />
+          </div>
+        </div>
+        <div class="api-test-msg" id="apiTestMsg"></div>
+        <div class="api-form-foot">
+          <div style="display:flex;gap:8px">
+            <button class="pill-btn" id="apiTestBtn" onclick="testCustomApi()">测试连接</button>
+            <button class="pill-btn" onclick="downloadTestKit()" title="下载包含测试音频与 Python 复现脚本的压缩包">下载测试包 (.zip)</button>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="pill-btn" onclick="closeApiModal()">取消</button>
+            <button class="pill-btn primary" onclick="saveCustomApi()">保存并使用</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== MODEL DOWNLOAD PROGRESS & INSTANT TRY SHEET ===== -->
+    <div class="dl-backdrop" id="dlBackdrop">
+      <div class="dl-card">
+        <button class="dl-close" onclick="cancelDownload()" title="关闭">✕</button>
+        <div class="dl-icon" id="dlIcon">🎙</div>
+        <div class="dl-title" id="dlTitle">正在下载模型</div>
+        <div class="dl-bar-wrap" id="dlBarWrap">
+          <div class="dl-bar"><div class="dl-bar-fill" id="dlFill"></div></div>
+          <div class="dl-stats">
+            <span id="dlBytes">0 MB / 0 MB</span>
+            <span id="dlPct">0%</span>
+          </div>
+          <div class="dl-hint" id="dlHint">请保持 Speaky 打开，直到下载与初始化完成。</div>
+        </div>
+        <div class="dl-try-box" id="dlTryBox">
+          <div class="dl-shortcut-card" onclick="simulateTryDictate()" style="cursor:pointer" title="点击模拟说一句">
+            <div class="dl-shortcut-row">
+              <div class="dl-shortcut-left"><span>按住</span><span class="keycap" id="dlKeyHold">Right Option</span></div>
+              <span class="dl-shortcut-right">按住时说话</span>
+            </div>
+            <div class="dl-shortcut-row">
+              <div class="dl-shortcut-left"><span>轻按</span><span class="keycap" id="dlKeyTap">Right Option</span></div>
+              <span class="dl-shortcut-right">开始录音，再按一次停止</span>
+            </div>
+          </div>
+          <textarea class="dl-try-input" id="dlTryInput" placeholder="你说的话会显示在这里…（也可点上方快捷键条模拟试说）"></textarea>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ===== FLOATING RECORDING OVERLAY (Left X Cancel / Right Check Confirm) ===== -->
+<div class="floating-overlay" id="floatingOverlay">
+  <div style="font-size:14px;padding:0 4px" id="ovCaption">正在聆听… 点左侧 ✕ 或按 Esc 取消（原音仍保留）</div>
+  <div class="ov-controls">
+    <button class="ov-x" onclick="overlayCancel()" title="取消转写、删除预览文字，但保留原始音频">✕</button>
+    <span style="width:7px;height:7px;border-radius:50%;background:#9eaaff"></span>
+    <span style="font-family:var(--font-mono);font-size:12px;color:#c7d0e6" id="ovTimer">00:00</span>
+    <div class="ov-wave" id="ovWave"></div>
+    <button class="ov-ok" onclick="overlayConfirm()" title="停止并保存，完成转写与写入">✓</button>
+  </div>
+</div>
+
+<!-- ===== CLIPBOARD FALLBACK TOAST ===== -->
+<div class="clipboard-toast" id="clipboardToast">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#83e4d0" stroke-width="2.2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+  <span>语音识别内容已保存到剪贴板，请手动粘贴</span>
+</div>
+
+<script>
+  let platform = 'mac', debugMode = false, llmOn = true, permOk = true;
+  let inAppRec = false, recSec = 0, recTimer = null;
+  let ovOpen = false, ovSec = 0, ovTimer = null;
+  let histFilter = 'all', histQuery = '', openMenuId = null, expandedHistIds = new Set(), tourStep = 0;
+  const langs = ['中文优先', '自动检测', 'English', '粤语'];
+  let langIdx = 0;
+
+  const recentData = {
+    polished: '首页先按 Typeless 的三栏节奏重排，把洞察热力图放中间，右侧收拢快捷键与实时运行状态。',
+    raw: '呃首页先对着 typeless 改一下吧，把那个洞察热力图放中间，右边收拢快捷键和实时运行状态。'
+  };
+
+  let historyItems = [
+    { id: 1, date: '今天', time: '11:21 AM', dur: '0:09', status: 'cancelled', tag: '待转写', raw: null, polished: null },
+    {
+      id: 2, date: '今天', time: '11:12 AM', dur: '0:14', status: 'polished', tag: '已改写',
+      asr: 'Whisper Large v3 · 离线', llm: 'deepseek-chat',
+      raw: recentData.raw, polished: recentData.polished,
+      debug: { model: 'deepseek-chat', key: 'sk-proj-••••••••4f2a', system: '去除口语赘词、修正标点，严格保留原意。', input: recentData.raw }
+    },
+    {
+      id: 3, date: '今天', time: '10:42 AM', dur: '0:11', status: 'fallback', tag: '仅原文',
+      asr: 'Whisper Large v3 · 离线', llm: 'deepseek-chat',
+      raw: '明天上午把 packs 离线包拷到断网测试机验证启动和听写。', polished: null,
+      fallback: '大模型超时（断网环境），已自动降级写入 ASR 原文',
+      debug: { model: 'deepseek-chat', key: 'sk-proj-••••••••4f2a', system: '去除口语赘词、修正标点。', input: '明天上午把 packs 离线包拷到断网测试机验证启动和听写。', err: 'Timeout -> fallback to ASR' }
+    },
+    {
+      id: 4, date: '昨天', time: '06:18 PM', dur: '0:22', status: 'polished', tag: '已改写',
+      asr: 'Whisper Large v3 · 离线', llm: 'deepseek-chat',
+      raw: '那个悬浮条左边必须是取消右边是确认，按 esc 取消之后实时预览要删掉但是原音一定要留着。',
+      polished: '悬浮条左侧为取消、右侧为确认；按 Esc 取消后清除实时预览文字，同时完整保留原始录音。',
+      debug: { model: 'deepseek-chat', key: 'sk-proj-••••••••4f2a', system: '去除口语赘词、修正标点，严格保留原意。', input: '那个悬浮条左边必须是取消右边是确认，按 esc 取消之后实时预览要删掉但是原音一定要留着。' }
+    }
+  ];
+
+  let terms = [
+    { wrong: '斯皮基', right: 'Speaky' },
+    { wrong: '太普勒斯', right: 'Typeless' }
+  ];
+
+  // Build Typeless-style 7x20 heatmap
+  (function buildHeatmap() {
+    const pattern = [
+      0,2,1,1,1,0,1,1,1,2,1,4,1,0,1,2,1,2,2,2,
+      2,1,1,1,1,1,1,2,1,2,1,1,1,4,2,2,1,2,4,2,
+      1,2,1,1,1,4,2,1,2,2,2,2,1,2,2,2,2,4,2,-1,
+      1,2,1,2,1,2,2,2,2,2,1,1,2,2,2,1,2,4,4,-1,
+      1,2,1,2,1,1,1,2,1,2,1,0,1,2,1,2,2,2,2,-1,
+      1,2,2,2,1,2,1,2,1,2,1,1,1,1,4,2,2,2,2,-1,
+      2,2,1,1,1,2,1,1,1,1,1,2,1,2,2,1,2,2,2,-1
+    ];
+    document.getElementById('heatCells').innerHTML = pattern.map(v => {
+      if (v === -1) return '<div class="hcell future"></div>';
+      return `<div class="hcell ${v ? 'l' + v : ''}" title="${v ? v * 850 + ' 字' : '无记录'}"></div>`;
+    }).join('');
+    document.getElementById('liveWave').innerHTML = Array.from({length: 28}, () => '<span></span>').join('');
+    document.getElementById('ovWave').innerHTML = Array.from({length: 22}, () => '<span></span>').join('');
+  })();
+
+  setInterval(() => {
+    const lvl = (inAppRec || ovOpen) ? (35 + Math.random() * 60) : (8 + Math.random() * 18);
+    document.getElementById('homeMeter').style.width = lvl + '%';
+    if (inAppRec) document.querySelectorAll('#liveWave span').forEach(s => s.style.height = (4 + Math.random() * 16) + 'px');
+    if (ovOpen) document.querySelectorAll('#ovWave span').forEach(s => s.style.height = (3 + Math.random() * 15) + 'px');
+  }, 110);
+
+  // Switches
+  document.getElementById('platformSwitch').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    platform = b.dataset.platform;
+    document.querySelectorAll('#platformSwitch button').forEach(x => x.classList.toggle('active', x === b));
+    document.getElementById('trafficLights').classList.toggle('hidden', platform === 'win');
+    document.getElementById('winChrome').classList.toggle('show', platform === 'win');
+    document.getElementById('hotkeyGroup').innerHTML = platform === 'mac'
+      ? '<span class="keycap">Right Option</span>'
+      : '<span class="keycap">Ctrl</span><span class="keycap">Shift</span><span class="keycap">D</span>';
+    document.getElementById('settingsKeycap').textContent = platform === 'mac' ? 'Right Option' : 'Ctrl + Shift + D';
+    document.getElementById('permStatusLabel').textContent = platform === 'mac' ? '麦克风 · 辅助功能' : '麦克风权限';
+    if (document.getElementById('tourBackdrop').classList.contains('show')) renderTour();
+  });
+
+  document.getElementById('themeSwitch').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    document.querySelectorAll('#themeSwitch button').forEach(x => x.classList.toggle('active', x === b));
+    document.body.classList.toggle('light', b.dataset.theme === 'light');
+  });
+
+  function switchPage(page, stab) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + page).classList.add('active');
+    document.querySelectorAll('.nav-item, .dock-btn[data-page]').forEach(el => el.classList.toggle('active', el.dataset.page === page));
+    if (stab) switchStab(stab);
+  }
+
+  function switchStab(stab) {
+    document.querySelectorAll('#settingsTabs .seg-tab').forEach(b => b.classList.toggle('active', b.dataset.stab === stab));
+    ['input', 'debug'].forEach(id => {
+      const el = document.getElementById('stab-' + id);
+      if (el) el.style.display = id === stab ? 'flex' : 'none';
+    });
+  }
+
+  // In-app recording
+  const chunks = ['正在边录边转写… ', '首页按 Typeless 改完之后清爽多了，', '洞察热力图在中间，右侧看状态和快捷键一眼明了。'];
+  function toggleInAppRec() {
+    if (!inAppRec) {
+      inAppRec = true; recSec = 0;
+      document.getElementById('liveStrip').classList.add('show');
+      document.getElementById('heroCancelBtn').style.display = 'inline-flex';
+      const btn = document.getElementById('heroRecBtn');
+      btn.className = 'pill-btn danger';
+      btn.textContent = '■ 停止并保存';
+      document.getElementById('livePreviewText').textContent = chunks[0];
+      recTimer = setInterval(() => {
+        recSec++;
+        document.getElementById('liveTimer').textContent = fmt(recSec);
+        document.getElementById('livePreviewText').textContent = chunks.slice(1, Math.min(3, Math.floor(recSec / 2) + 2)).join('');
+      }, 1000);
+    } else {
+      finishInAppRec(false);
+    }
+  }
+  function cancelInAppRec() { finishInAppRec(true); }
+  function finishInAppRec(cancelled) {
+    clearInterval(recTimer); inAppRec = false;
+    document.getElementById('liveStrip').classList.remove('show');
+    document.getElementById('heroCancelBtn').style.display = 'none';
+    const btn = document.getElementById('heroRecBtn');
+    btn.className = 'pill-btn primary';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>开始录音';
+    const dur = fmt(Math.max(recSec, 3));
+    if (cancelled) {
+      historyItems.unshift({ id: Date.now(), date: '今天', time: '刚刚', dur, status: 'cancelled', tag: '待转写' });
+      renderHistory();
+      showAppToast('已取消转写并清除预览，原始录音已保存在历史中');
+    } else {
+      const raw = '首页按 Typeless 改完之后清爽多了，洞察热力图在中间，右侧看状态和快捷键一眼明了。';
+      const pol = '首页按 Typeless 重排后清爽很多：中间展示洞察热力图，右侧集中呈现快捷键与运行状态。';
+      recentData.raw = raw; recentData.polished = pol;
+      document.getElementById('recentText').textContent = llmOn ? pol : raw;
+      document.getElementById('recentMeta').textContent = `${dur} · 刚刚保存`;
+      historyItems.unshift({
+        id: Date.now(), date: '今天', time: '刚刚', dur, status: llmOn ? 'polished' : 'fallback',
+        tag: llmOn ? '已改写' : '仅原文',
+        asr: document.getElementById('asrStatusLabel').textContent, llm: llmOn ? 'deepseek-chat' : null,
+        raw, polished: llmOn ? pol : null,
+        debug: llmOn ? { model: 'deepseek-chat', key: 'sk-proj-••••••••4f2a', system: '去除口语赘词、修正标点。', input: raw } : null
+      });
+      renderHistory();
+      showAppToast('已停止并保存：原文与改写稿已独立归档');
+    }
+    document.getElementById('liveTimer').textContent = '00:00';
+  }
+
+  function setRecentLayer(layer, btn) {
+    document.querySelectorAll('#recentLayerTabs button').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('recentText').textContent = recentData[layer];
+  }
+
+  function cycleLang() {
+    langIdx = (langIdx + 1) % langs.length;
+    document.getElementById('langKeycap').textContent = langs[langIdx];
+    showAppToast('推荐识别语言：' + langs[langIdx]);
+  }
+
+  function togglePermDemo() {
+    permOk = !permOk;
+    document.getElementById('permDot').classList.toggle('warn', !permOk);
+    const dpd = document.getElementById('dockPermDot'); if (dpd) dpd.classList.toggle('warn', !permOk);
+    document.getElementById('permBtn').textContent = permOk ? '已通' : '去授权';
+    const warnMsg = platform === 'mac' ? '辅助功能未授权，点击可跳转系统设置' : '麦克风权限未授权，点击可跳转系统设置';
+    showAppToast(permOk ? '权限已全部开通' : warnMsg);
+  }
+
+  function testMic() { showAppToast('正在测麦… ✓ 采集正常（-14dB）'); }
+  function testAsr(btn) { const t = btn.textContent; btn.textContent = '…'; setTimeout(() => { btn.textContent = t; showAppToast('✓ ASR 样本测试通过（0.36s · 与参考一致）'); }, 650); }
+  function testLlm(btn) { const t = btn.textContent; btn.textContent = '…'; setTimeout(() => { btn.textContent = t; showAppToast('✓ 大模型连通正常（0.52s · 事实保留 98/100）'); }, 700); }
+  function runFullCheck() { showAppToast('全链路体检通过：麦克风 ✓ · 离线 ASR ✓ · LLM 改写 ✓'); }
+
+  function toggleLlm() {
+    llmOn = !llmOn;
+    const sw = document.getElementById('llmSwitch'); if (sw) sw.classList.toggle('on', llmOn);
+    document.getElementById('modelsLlmSwitch').classList.toggle('on', llmOn);
+    document.getElementById('llmToggleLabel').textContent = llmOn ? '已开启改写' : '已关闭改写（建议开启）';
+    document.getElementById('llmDot').classList.toggle('warn', !llmOn);
+    document.getElementById('llmStatusLabel').textContent = llmOn ? 'DeepSeek 改写' : '未开改写（建议开启）';
+    if (modelKind === 'llm') document.getElementById('modelTable').style.opacity = llmOn ? '1' : '0.45';
+  }
+
+  function toggleDebugMode() {
+    debugMode = !debugMode;
+    document.getElementById('settingsDebugSwitch').classList.toggle('on', debugMode);
+    document.getElementById('histDebugSwitch').classList.toggle('on', debugMode);
+    const ddb = document.getElementById('dockDebugBtn'); if (ddb) ddb.classList.toggle('active', debugMode);
+    document.getElementById('histDebugTag').style.display = debugMode ? 'inline-flex' : 'none';
+    renderHistory();
+    showAppToast(debugMode ? 'Debug 模式已开启（展开任意记录可看脱敏请求详情）' : 'Debug 模式已关闭');
+  }
+
+  function filterHist(f, btn) {
+    histFilter = f;
+    document.querySelectorAll('#histFilters .seg-tab').forEach(b => b.classList.toggle('active', b === btn));
+    renderHistory();
+  }
+
+  function onHistSearch(val) {
+    histQuery = val.trim().toLowerCase();
+    document.getElementById('histSearchClear').classList.toggle('show', histQuery.length > 0);
+    renderHistory();
+  }
+
+  function clearHistSearch() {
+    const inp = document.getElementById('histSearch');
+    inp.value = '';
+    onHistSearch('');
+    inp.focus();
+  }
+
+  function toggleHistDetail(id) {
+    if (expandedHistIds.has(id)) expandedHistIds.delete(id);
+    else expandedHistIds.add(id);
+    renderHistory();
+  }
+
+  function toggleRowMenu(id, e) {
+    e.stopPropagation();
+    openMenuId = openMenuId === id ? null : id;
+    renderHistory();
+  }
+
+  function deleteHistItem(id, e) {
+    if (e) e.stopPropagation();
+    historyItems = historyItems.filter(x => x.id !== id);
+    openMenuId = null;
+    expandedHistIds.delete(id);
+    renderHistory();
+    showAppToast('已删除该条记录');
+  }
+
+  document.addEventListener('click', () => {
+    if (openMenuId !== null) { openMenuId = null; renderHistory(); }
+  });
+
+  function renderHistory() {
+    const items = historyItems.filter(i => {
+      if (histFilter !== 'all' && i.status !== histFilter) return false;
+      if (histQuery) {
+        const hay = `${i.polished || ''} ${i.raw || ''} ${i.tag || ''} ${i.time || ''}`.toLowerCase();
+        if (!hay.includes(histQuery)) return false;
+      }
+      return true;
+    });
+
+    const container = document.getElementById('historyList');
+    if (!items.length) {
+      container.innerHTML = `<div class="hist-empty">${histQuery ? `未找到包含「${histQuery}」的历史记录` : '当前筛选下暂无记录'}</div>`;
+      return;
+    }
+
+    const groups = [];
+    const map = new Map();
+    items.forEach(i => {
+      const d = i.date || '今天';
+      if (!map.has(d)) { map.set(d, []); groups.push(d); }
+      map.get(d).push(i);
+    });
+
+    container.innerHTML = groups.map(date => `
+      <div class="hist-date-label">${date}</div>
+      <div class="hist-group">
+        ${map.get(date).map(i => {
+          const isOpen = expandedHistIds.has(i.id) || (debugMode && i.debug);
+          const isMenu = openMenuId === i.id;
+          const mainText = i.status === 'cancelled'
+            ? '<span style="color:var(--muted)">转录已被取消（原音已留存）。</span>'
+            : (i.polished || i.raw);
+          return `
+          <div class="hist-row ${isMenu ? 'menu-open' : ''}">
+            <div class="hist-row-main" onclick="toggleHistDetail(${i.id})">
+              <div class="hist-time">${i.time}</div>
+              <div class="hist-body">
+                <div class="hist-text">${mainText}${i.status === 'fallback' ? ' <span class="tag warn" style="margin-left:6px">仅原文</span>' : ''}</div>
+              </div>
+              <div class="hist-actions" onclick="event.stopPropagation()" style="${i.status === 'cancelled' ? 'opacity:1' : ''}">
+                ${i.status === 'cancelled'
+                  ? `<button class="pill-btn" style="height:28px;padding:0 11px;font-size:12px" onclick="retranscribe(${i.id})">↻ 重试</button>`
+                  : `<button class="hist-icon-btn" title="复制文本" onclick="showAppToast('已复制到剪贴板')">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>`
+                }
+                <button class="hist-icon-btn" title="播放原音 (${i.dur})" onclick="showAppToast('正在播放原音 ${i.dur}')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+                </button>
+                <button class="hist-icon-btn" title="更多操作" onclick="toggleRowMenu(${i.id}, event)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="row-menu ${isMenu ? 'open' : ''}" onclick="event.stopPropagation()">
+              <button onclick="openMenuId=null;retranscribe(${i.id})">↻ 重新转写</button>
+              <button onclick="openMenuId=null;toggleHistDetail(${i.id})">☰ ${isOpen ? '收起详情' : '查看原文 / 改写'}</button>
+              <button onclick="openMenuId=null;renderHistory();showAppToast('已导出原始音频文件')">↓ 下载</button>
+              <div class="menu-sep"></div>
+              <button class="danger" onclick="deleteHistItem(${i.id}, event)">✕ 删除记录</button>
+            </div>
+
+            <div class="hist-detail ${isOpen ? 'open' : ''}">
+              ${i.status === 'cancelled'
+                ? `<div class="layer-box"><div style="font-size:12.5px;color:var(--muted);margin-bottom:8px">原始音频已完整留存，可随时重新转写或衔接继续录制</div><div style="display:flex;gap:8px"><button class="pill-btn primary" style="height:28px" onclick="retranscribe(${i.id})">立即重新转写</button><button class="pill-btn" style="height:28px" onclick="showAppToast('已衔接此段原音继续录制')">继续录音</button></div></div>`
+                : `${i.polished ? `<div class="layer-box polished"><div class="layer-kicker"><span>✨ 改写稿 · ${i.llm}</span><button class="mini-test" onclick="showAppToast('已复制改写稿')">复制</button></div><div style="font-size:13px;line-height:1.6">${i.polished}</div></div>` : ''}
+                   ${i.fallback ? `<div style="margin-top:8px;font-size:12px;color:var(--warn)">⚠ ${i.fallback}</div>` : ''}
+                   <div class="layer-box"><div class="layer-kicker"><span>ASR 原文 · ${i.asr}</span><button class="mini-test" onclick="showAppToast('已复制 ASR 原文')">复制</button></div><div style="font-size:13px;line-height:1.6">${i.raw}</div></div>`
+              }
+              ${debugMode && i.debug ? `<div class="debug-box">model: ${i.debug.model} | api_key: ${i.debug.key}<br>system: ${i.debug.system}<br>input: ${i.debug.input}${i.debug.err ? '<br>error: ' + i.debug.err : ''}</div>` : ''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`).join('');
+  }
+
+  function retranscribe(id) {
+    const i = historyItems.find(x => x.id === id); if (!i) return;
+    i.status = 'polished'; i.tag = '已改写';
+    i.asr = document.getElementById('asrStatusLabel').textContent; i.llm = 'deepseek-chat';
+    i.raw = '刚才取消的那段录音已经重新转写完成，原始音频一直保留着。';
+    i.polished = '刚才取消的录音已重新转写完成，原始音频完整保留。';
+    i.fallback = null;
+    i.debug = { model: 'deepseek-chat', key: 'sk-proj-••••••••4f2a', system: '去除口语赘词、修正标点。', input: i.raw };
+    renderHistory();
+    showAppToast('重新转写完成');
+  }
+
+  function renderTerms() {
+    document.getElementById('termsList').innerHTML = terms.map((t, idx) => `
+      <div class="layer-box" style="margin-top:0;display:flex;justify-content:space-between;align-items:center">
+        <span><s style="color:var(--muted)">${t.wrong}</s> → <strong>${t.right}</strong></span>
+        <button class="icon-xs" onclick="terms.splice(${idx},1);renderTerms()">✕</button>
+      </div>`).join('');
+  }
+  function addTerm() {
+    const w = document.getElementById('wrongIn').value.trim(), r = document.getElementById('rightIn').value.trim();
+    if (!w || !r) return;
+    terms.unshift({ wrong: w, right: r });
+    document.getElementById('wrongIn').value = ''; document.getElementById('rightIn').value = '';
+    renderTerms();
+  }
+
+  // Overlay & Clipboard Demo
+  function toggleOverlayDemo() {
+    const ov = document.getElementById('floatingOverlay');
+    if (ovOpen) { ovOpen = false; clearInterval(ovTimer); ov.classList.remove('show'); return; }
+    ovOpen = true; ovSec = 0; ov.classList.add('show');
+    document.getElementById('ovCaption').textContent = '正在聆听… 点左侧 ✕ 或按 Esc 取消（原音仍保留）';
+    ovTimer = setInterval(() => {
+      ovSec++; document.getElementById('ovTimer').textContent = fmt(ovSec);
+      if (ovSec === 2) document.getElementById('ovCaption').textContent = '把新的 Speaky 首页方案发给团队看看…';
+    }, 1000);
+  }
+  function overlayCancel() {
+    ovOpen = false; clearInterval(ovTimer); document.getElementById('floatingOverlay').classList.remove('show');
+    historyItems.unshift({ id: Date.now(), date: '今天', time: '刚刚', dur: fmt(Math.max(ovSec, 2)), status: 'cancelled', tag: '待转写' });
+    renderHistory();
+    showAppToast('悬浮条已取消：预览文字已清除，原始录音已保存在历史中');
+  }
+  function overlayConfirm() {
+    ovOpen = false; clearInterval(ovTimer); document.getElementById('floatingOverlay').classList.remove('show');
+    showAppToast('已停止并保存，写入完成后自动清理临时剪贴板');
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (ovOpen) overlayCancel();
+      else if (inAppRec) cancelInAppRec();
+      else if (document.getElementById('tourBackdrop').classList.contains('show')) closeTour();
+    }
+  });
+
+  let clipTimer = null;
+  function showClipboardNotice() {
+    const el = document.getElementById('clipboardToast');
+    el.classList.add('show'); clearTimeout(clipTimer);
+    clipTimer = setTimeout(() => el.classList.remove('show'), 3500);
+  }
+
+  // ===== BRAND LOGOS (Crisp Zero-Dependency Inline SVGs) =====
+  const brandLogos = {
+    qwen: `<svg viewBox="0 0 36 36" fill="none"><rect width="36" height="36" rx="9" fill="#ffffff"/><g transform="translate(6,6)"><path d="M19.713 2.825h-5.907c0-.251-.066-.503-.196-.728L12.819.728A1.46 1.46 0 0 0 11.559 0h-1.58c-.52 0-1 .275-1.26.728l-2.42 4.19a1.45 1.45 0 0 0 0 1.453l.791 1.37c.26.448.74.727 1.26.727h11.36c.52 0 1-.275 1.26-.728l.79-1.37a1.45 1.45 0 0 0 0-1.451l-.79-1.37a1.46 1.46 0 0 0-1.26-.728zM.195 9.905l2.951 5.115a1.46 1.46 0 0 0-.531.531l-.791 1.37a1.45 1.45 0 0 0 0 1.452l.79 1.37c.26.448.74.727 1.26.727h4.84c.52 0 1-.275 1.26-.728l.79-1.37a1.45 1.45 0 0 0 0-1.451L5.086 7.083a1.46 1.46 0 0 0-1.26-.728h-1.58c-.52 0-1 .276-1.26.728l-.79 1.37a1.45 1.45 0 0 0 0 1.452m15.888 13.367 2.951-5.115c.217.125.469.196.728.196h1.582c.52 0 1-.275 1.26-.728l.79-1.37a1.45 1.45 0 0 0 0-1.451l-2.42-4.191a1.46 1.46 0 0 0-1.259-.728h-1.582c-.52 0-1 .276-1.259.728l-5.678 9.838a1.45 1.45 0 0 0 0 1.452l.79 1.37c.26.448.74.727 1.26.727h1.582c.52 0 1-.275 1.26-.728z" fill="#082dff"></path></g></svg>`,
+    sensevoice: `<svg viewBox="0 0 64 64" fill="none"><rect width="64" height="64" rx="16" fill="url(#sg)"/><defs><linearGradient id="sg" x1="0" y1="0" x2="64" y2="64"><stop stop-color="#FF6A00"/><stop offset="1" stop-color="#FF9A2E"/></linearGradient></defs><rect x="15" y="27" width="5" height="10" rx="2.5" fill="#fff"/><rect x="24" y="19" width="5" height="26" rx="2.5" fill="#fff"/><rect x="33" y="14" width="5" height="36" rx="2.5" fill="#fff"/><rect x="42" y="22" width="5" height="20" rx="2.5" fill="#fff"/></svg>`,
+    doubao: `<svg viewBox="0 0 36 36" fill="none"><rect width="36" height="36" rx="9" fill="#ffffff"/><g transform="translate(6,6)"><path d="M5.31 15.756c.172-3.75 1.883-5.999 2.549-6.739-3.26 2.058-5.425 5.658-6.358 8.308v1.12C1.501 21.513 4.226 24 7.59 24a6.59 6.59 0 002.2-.375c.353-.12.7-.248 1.039-.378.913-.899 1.65-1.91 2.243-2.992-4.877 2.431-7.974.072-7.763-4.5l.002.001z" fill="#1E37FC"></path><path d="M22.57 10.283c-1.212-.901-4.109-2.404-7.397-2.8.295 3.792.093 8.766-2.1 12.773a12.782 12.782 0 01-2.244 2.992c3.764-1.448 6.746-3.457 8.596-5.219 2.82-2.683 3.353-5.178 3.361-6.66a2.737 2.737 0 00-.216-1.084v-.002z" fill="#37E1BE"></path><path d="M14.303 1.867C12.955.7 11.248 0 9.39 0 7.532 0 5.883.677 4.545 1.807 2.791 3.29 1.627 5.557 1.5 8.125v9.201c.932-2.65 3.097-6.25 6.357-8.307.5-.318 1.025-.595 1.569-.829 1.883-.801 3.878-.932 5.746-.706-.222-2.83-.718-5.002-.87-5.617h.001z" fill="#A569FF"></path><path d="M17.305 4.961a199.47 199.47 0 01-1.08-1.094c-.202-.213-.398-.419-.586-.622l-1.333-1.378c.151.615.648 2.786.869 5.617 3.288.395 6.185 1.898 7.396 2.8-1.306-1.275-3.475-3.487-5.266-5.323z" fill="#1E37FC"></path></g></svg>`,
+    deepseek: `<svg viewBox="0 0 36 36" fill="none"><rect width="36" height="36" rx="9" fill="#ffffff"/><g transform="translate(6,6)"><path d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z" fill="#4D6BFE"></path></g></svg>`,
+    api: `<svg viewBox="0 0 64 64" fill="none"><rect width="64" height="64" rx="16" fill="#2B2E36"/><path d="M22 32h20M32 22v20" stroke="#9AA5B8" stroke-width="4" stroke-linecap="round"/><circle cx="22" cy="32" r="4.5" fill="#6889FF"/><circle cx="42" cy="32" r="4.5" fill="#46C88A"/><circle cx="32" cy="22" r="4.5" fill="#E6B24C"/><circle cx="32" cy="42" r="4.5" fill="#9AA5B8"/></svg>`
+  };
+
+  // ===== AI MODELS (Unified Open-source Download + Online Connect/Test) =====
+  let modelKind = 'asr';
+  let selectedAsrId = 'qwen3-asr-0.6b', selectedLlmId = 'deepseek-chat';
+
+  const modelCatalog = {
+    asr: [
+      { id: 'qwen3-asr-0.6b', kind: 'open', state: 'downloaded', size: '680 MB', icon: brandLogos.qwen, name: 'Qwen3-ASR-0.6B', badge: '推荐', desc: '中英混排与方言准确度出色，纯 CPU 桌面端均衡主力。', acc: 4.8, spd: 4.5, feats: ['本机运行', '中英混排'] },
+      { id: 'sensevoice-small', kind: 'open', state: 'downloaded', size: '220 MB', icon: brandLogos.sensevoice, name: 'SenseVoice-Small', badge: '最快', desc: '非自回归轻量开源模型，纯 CPU 毫秒级出字，老旧电脑无压力。', acc: 4.5, spd: 5.0, feats: ['本机运行', '极速轻量'] },
+      { id: 'qwen3-asr-1.7b', kind: 'open', state: 'not_downloaded', size: '1.7 GB', icon: brandLogos.qwen, name: 'Qwen3-ASR-1.7B', badge: '高精度', desc: '开源第一梯队准确度，适合复杂专业术语与会议录音转录。', acc: 5.0, spd: 3.5, feats: ['本机运行', '极限精度'] },
+      { id: 'volcengine-doubao-asr', kind: 'online', state: 'connected', icon: brandLogos.doubao, name: '火山 Doubao-语音识别', badge: null, desc: '火山引擎在线流式语音识别，中文、方言与中英混排表现稳定。', acc: 5.0, spd: 4.8, feats: ['在线服务', '流式实时'] }
+    ],
+    llm: [
+      { id: 'deepseek-chat', kind: 'online', state: 'connected', icon: brandLogos.deepseek, name: 'DeepSeek', badge: '推荐', desc: 'OpenAI Chat Completion 兼容接口，快速去除口语赘词、修正标点与中英混排。', acc: 4.8, spd: 4.6, feats: ['整理与标点', '长段润色'] },
+      { id: 'custom-openai', kind: 'online', state: 'unconfigured', icon: brandLogos.api, name: '自定义 OpenAI 兼容接口', badge: null, desc: '填写任意 Base URL、API Key 与模型名（支持企业网关或第三方服务）。', acc: 4.5, spd: 4.5, feats: ['自定义端点', '自定义模型'] }
+    ]
+  };
+
+  function signalBars(score) {
+    const filled = Math.round(score);
+    const heights = [4, 6, 8, 10, 12];
+    return `<span class="signal-bars">${heights.map((h, idx) => `<i class="${idx < filled ? 'on' : ''}" style="height:${h}px"></i>`).join('')}</span>`;
+  }
+
+  function toggleAsrAdvanced() {
+    const p = document.getElementById('asrAdvPanel');
+    const open = p.style.display === 'none';
+    p.style.display = open ? 'block' : 'none';
+    document.getElementById('asrAdvToggle').textContent = open ? '高级（离线导入 / 导出） ▴' : '高级（离线导入 / 导出） ▾';
+  }
+
+  function setModelKind(k, btn) {
+    modelKind = k;
+    document.querySelectorAll('#modelMainTabs .model-main-tab').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('asrAdvancedSection').style.display = k === 'asr' ? 'block' : 'none';
+    document.getElementById('llmToggleWrap').style.display = k === 'llm' ? 'inline-flex' : 'none';
+    document.getElementById('modelTable').style.opacity = (k === 'llm' && !llmOn) ? '0.45' : '1';
+    document.getElementById('modelSubtitle').textContent = k === 'asr'
+      ? '选择一个听写模型：开源模型下载后即点即用，在线模型配置密钥后即可连接测试。'
+      : '可选（建议开启）。通过远程 OpenAI Chat Completion 兼容接口去除口语赘词、修正标点；失败时自动降级写入 ASR 原文。';
+    renderModels();
+  }
+
+  function selectModel(id) {
+    const m = modelCatalog[modelKind].find(x => x.id === id); if (!m) return;
+    if (m.kind === 'open' && m.state === 'not_downloaded') {
+      downloadModel(id, { stopPropagation() {} });
+      return;
+    }
+    if (m.kind === 'online' && m.state === 'unconfigured') {
+      connectModel(id, { stopPropagation() {} });
+      return;
+    }
+    if (modelKind === 'asr') {
+      selectedAsrId = id;
+      document.getElementById('asrStatusLabel').textContent = m.name + (m.kind === 'open' ? ' · 本地' : ' · 在线');
+    } else {
+      selectedLlmId = id;
+      document.getElementById('llmStatusLabel').textContent = m.name.replace(/（.*）/, '') + ' 改写';
+    }
+    renderModels();
+    showAppToast(`已切换为 ${m.name}`);
+  }
+
+  let dlTimer = null, dlModelRef = null;
+  function downloadModel(id, e) {
+    e.stopPropagation();
+    const m = modelCatalog[modelKind].find(x => x.id === id); if (!m) return;
+    dlModelRef = m;
+    m.state = 'downloading';
+    renderModels();
+
+    const totalMb = m.size.includes('GB') ? parseFloat(m.size) * 1024 : parseFloat(m.size);
+    let pct = 3;
+    document.getElementById('dlIcon').innerHTML = m.icon;
+    document.getElementById('dlTitle').textContent = `正在下载 ${m.name}`;
+    document.getElementById('dlHint').textContent = '请保持 Speaky 打开，直到下载与初始化完成。';
+    document.getElementById('dlBarWrap').style.display = 'block';
+    document.getElementById('dlTryBox').classList.remove('show');
+    document.getElementById('dlFill').style.width = pct + '%';
+    document.getElementById('dlBytes').textContent = `${(totalMb * pct / 100).toFixed(1)} MB / ${totalMb.toFixed(1)} MB`;
+    document.getElementById('dlPct').textContent = pct + '%';
+    document.getElementById('dlBackdrop').classList.add('show');
+
+    clearInterval(dlTimer);
+    dlTimer = setInterval(() => {
+      pct = Math.min(100, pct + Math.floor(8 + Math.random() * 11));
+      document.getElementById('dlFill').style.width = pct + '%';
+      document.getElementById('dlBytes').textContent = `${(totalMb * pct / 100).toFixed(1)} MB / ${totalMb.toFixed(1)} MB`;
+      document.getElementById('dlPct').textContent = pct + '%';
+      if (pct >= 100) {
+        clearInterval(dlTimer);
+        document.getElementById('dlHint').textContent = '✓ 下载完成，正在准备使用…';
+        setTimeout(() => {
+          m.state = 'downloaded';
+          selectModel(m.id);
+          const k = platform === 'mac' ? 'Right Option' : 'Ctrl + Shift + D';
+          document.getElementById('dlTitle').textContent = m.name;
+          document.getElementById('dlBarWrap').style.display = 'none';
+          document.getElementById('dlKeyHold').textContent = k;
+          document.getElementById('dlKeyTap').textContent = k;
+          const ta = document.getElementById('dlTryInput');
+          ta.value = '';
+          document.getElementById('dlTryBox').classList.add('show');
+          ta.focus();
+        }, 450);
+      }
+    }, 160);
+  }
+
+  function simulateTryDictate() {
+    const ta = document.getElementById('dlTryInput');
+    ta.value = `新模型 ${dlModelRef ? dlModelRef.name : ''} 已就绪，现在说话可以直接把文字写进这个输入框。`;
+    ta.focus();
+  }
+
+  function cancelDownload() {
+    clearInterval(dlTimer);
+    document.getElementById('dlBackdrop').classList.remove('show');
+    if (dlModelRef && dlModelRef.state === 'downloading') {
+      dlModelRef.state = 'not_downloaded';
+      renderModels();
+      showAppToast('已取消下载');
+    }
+  }
+
+  function startModel(id, e) {
+    e.stopPropagation();
+    const list = modelCatalog[modelKind];
+    list.forEach(x => { if (x.kind === 'open' && x.state === 'running') x.state = 'downloaded'; });
+    const m = list.find(x => x.id === id); if (!m) return;
+    m.state = 'running';
+    selectModel(id);
+    showAppToast(`✓ ${m.name} 已启动并设为当前模型`);
+  }
+
+  function onApiProtoChange() {
+    const p = document.getElementById('apiProtoIn').value;
+    const urlIn = document.getElementById('apiUrlIn');
+    const modelField = document.getElementById('apiModelField');
+    if (p === 'funasr') {
+      urlIn.placeholder = 'wss://your-funasr-host:10095';
+      if (!urlIn.value || urlIn.value.startsWith('http')) urlIn.value = 'wss://127.0.0.1:10095';
+      modelField.style.display = 'none';
+    } else if (p === 'whisper-cpp') {
+      urlIn.placeholder = 'http://127.0.0.1:8080/inference';
+      if (!urlIn.value || urlIn.value.startsWith('ws')) urlIn.value = 'http://127.0.0.1:8080/inference';
+      modelField.style.display = 'none';
+    } else {
+      urlIn.placeholder = 'https://api.example.com/v1/audio/transcriptions';
+      if (!urlIn.value || urlIn.value.startsWith('ws')) urlIn.value = 'https://api.example.com/v1';
+      modelField.style.display = 'flex';
+    }
+  }
+
+  let editingApiId = null;
+  function openApiModal(id, e) {
+    if (e) e.stopPropagation();
+    editingApiId = id;
+    const m = id ? modelCatalog[modelKind].find(x => x.id === id) : null;
+    const isAsr = modelKind === 'asr';
+    document.getElementById('apiProtoField').style.display = isAsr ? 'flex' : 'none';
+    document.getElementById('apiModelField').style.display = 'flex';
+    document.getElementById('apiModalTitle').textContent = m ? `配置 ${m.name}` : (isAsr ? '连接自定义听写 API' : '连接自定义 AI 处理 API');
+    document.getElementById('apiModalSub').textContent = isAsr
+      ? '支持标准转写 HTTP、FunASR WebSocket 与 whisper.cpp 原生 HTTP。'
+      : '支持标准 Chat Completion 兼容接口，密钥仅保存在本机。';
+    document.getElementById('apiProtoIn').value = (m && m.protocol) || 'auto';
+    document.getElementById('apiNameIn').placeholder = isAsr ? '例如：企业内部语音服务 / 自建转写网关' : '例如：企业内部网关 / DeepSeek';
+    document.getElementById('apiNameIn').value = m ? m.name : '';
+    document.getElementById('apiUrlIn').value = m && m.baseUrl ? m.baseUrl : 'https://api.example.com/v1';
+    document.getElementById('apiKeyIn').value = m && m.state === 'connected' ? 'sk-demo-••••••••4f2a' : '';
+    document.getElementById('apiModelIn').placeholder = isAsr ? '例如：qwen3-asr-0.6b / sensevoice-small' : '例如：deepseek-chat';
+    document.getElementById('apiModelIn').value = m && m.modelId ? m.modelId : (isAsr ? 'qwen3-asr-0.6b' : 'deepseek-chat');
+    if (isAsr) onApiProtoChange();
+    document.getElementById('apiTestMsg').textContent = '';
+    document.getElementById('apiBackdrop').classList.add('show');
+  }
+  function closeApiModal() { document.getElementById('apiBackdrop').classList.remove('show'); }
+  function testCustomApi() {
+    const url = document.getElementById('apiUrlIn').value.trim();
+    const proto = document.getElementById('apiProtoIn').value;
+    const msg = document.getElementById('apiTestMsg');
+    if (!url) { msg.style.color = 'var(--warn)'; msg.textContent = '⚠ 请先填写接口地址'; return; }
+    msg.style.color = 'var(--muted)';
+    msg.textContent = (modelKind === 'asr' && proto === 'auto') ? '正在自动探测协议并测试连通性…' : '正在测试连通性…';
+    setTimeout(() => {
+      msg.style.color = 'var(--ok)';
+      if (modelKind === 'asr' && proto === 'auto') {
+        const detected = url.startsWith('ws') ? 'FunASR WebSocket' : (url.includes('/inference') ? 'whisper.cpp 原生 HTTP' : 'OpenAI 兼容转写');
+        msg.textContent = `✓ 已自动识别为「${detected}」（延迟 0.38s · 响应正常）`;
+      } else {
+        msg.textContent = '✓ 连接成功（延迟 0.38s · 模型响应正常）';
+      }
+    }, 550);
+  }
+  function downloadTestKit() {
+    const pkg = modelKind === 'asr' ? 'speaky-asr-test-kit.zip（含 sample.wav + test_asr.py）' : 'speaky-llm-test-kit.zip（含 sample_prompt.json + test_llm.py）';
+    showAppToast(`已下载 ${pkg}`);
+  }
+  function saveCustomApi() {
+    const name = document.getElementById('apiNameIn').value.trim() || '自定义模型 API';
+    const baseUrl = document.getElementById('apiUrlIn').value.trim();
+    const key = document.getElementById('apiKeyIn').value.trim();
+    const modelId = document.getElementById('apiModelIn').value.trim() || 'custom';
+    if (!baseUrl || !key) {
+      const msg = document.getElementById('apiTestMsg');
+      msg.style.color = 'var(--warn)'; msg.textContent = '⚠ 请填写完整的接口地址与 API Key';
+      return;
+    }
+    if (editingApiId) {
+      const m = modelCatalog[modelKind].find(x => x.id === editingApiId);
+      if (m) { m.name = name; m.baseUrl = baseUrl; m.modelId = modelId; m.state = 'connected'; }
+      closeApiModal();
+      selectModel(editingApiId);
+    } else {
+      const newId = 'custom-' + Date.now();
+      modelCatalog[modelKind].push({
+        id: newId, kind: 'online', state: 'connected', baseUrl, modelId,
+        icon: brandLogos.api, name, badge: null,
+        desc: `自定义接口（${modelId} · ${baseUrl.replace(/^https?:\/\//, '').split('/')[0]}）`,
+        acc: 4.6, spd: 4.5, feats: ['自定义端点', '已验证']
+      });
+      closeApiModal();
+      selectModel(newId);
+    }
+    showAppToast(`✓ 已保存并切换至 ${name}`);
+  }
+
+  function connectModel(id, e) { openApiModal(id, e); }
+
+  function renderModelStatus(m, sel) {
+    if (m.kind === 'open') {
+      if (m.state === 'downloading') return `<span class="tag warn">下载中</span>`;
+      if (m.state === 'not_downloaded') return '';
+      return sel ? `<span class="tag ok">已就绪</span>` : `<span class="tag">已下载</span>`;
+    } else {
+      return m.state === 'connected' ? `<span class="tag ok">已连接</span>` : '';
+    }
+  }
+
+  function renderModelAction(m, sel) {
+    const testFn = modelKind === 'asr' ? 'testAsr(this)' : 'testLlm(this)';
+    if (m.kind === 'open') {
+      if (m.state === 'not_downloaded') {
+        return `<button class="model-link-btn" onclick="downloadModel('${m.id}', event)">↓ 下载（${m.size}）</button>`;
+      }
+      if (m.state === 'downloading') {
+        return `<span style="font-size:12px;color:var(--muted)">正在下载…</span>`;
+      }
+      if (sel) {
+        return `<button class="model-link-btn" onclick="event.stopPropagation();${testFn}">测试</button>`;
+      }
+      return '';
+    } else {
+      if (m.state === 'unconfigured') {
+        return `<button class="model-link-btn" onclick="connectModel('${m.id}', event)">配置连接</button>`;
+      }
+      return `<button class="model-link-btn" onclick="event.stopPropagation();${testFn}">测试连接</button>
+              <button class="model-link-btn" style="color:var(--muted)" onclick="openApiModal('${m.id}', event)">配置</button>`;
+    }
+  }
+
+  function renderModels() {
+    const list = modelCatalog[modelKind];
+    const currentId = modelKind === 'asr' ? selectedAsrId : selectedLlmId;
+    const col3 = modelKind === 'asr' ? '准确度' : '质量';
+    const col5 = modelKind === 'asr' ? '特点' : '适合';
+    document.getElementById('modelTable').innerHTML = `
+      <div class="model-thead">
+        <div></div><div>模型</div><div>${col3}</div><div>速度</div><div>${col5}</div>
+      </div>
+      ${list.map(m => {
+        const sel = m.id === currentId;
+        const actionsHtml = renderModelAction(m, sel);
+        return `
+        <div class="model-row ${sel ? 'selected' : ''}" onclick="selectModel('${m.id}')">
+          <div><span class="radio-dot"></span></div>
+          <div class="model-info">
+            <div class="model-icon">${m.icon}</div>
+            <div>
+              <div class="model-name-line">${m.name}<span class="tag">${m.kind === 'open' ? '本地模型' : '在线模型'}</span>${m.badge ? `<span class="model-badge">${m.badge}</span>` : ''}${renderModelStatus(m, sel)}</div>
+              <div class="model-desc">${m.desc}</div>
+              ${actionsHtml ? `<div class="model-inline-actions">${actionsHtml}</div>` : ''}
+            </div>
+          </div>
+          <div class="signal-cell">${signalBars(m.acc)}<span>${m.acc.toFixed(1)}</span></div>
+          <div class="signal-cell">${signalBars(m.spd)}<span>${m.spd.toFixed(1)}</span></div>
+          <div class="feat-list">${m.feats.map(f => `<div class="feat-item">${f}</div>`).join('')}</div>
+        </div>`;
+      }).join('')}
+    `;
+  }
+
+  function simulateFileTranscribe(filename) {
+    showAppToast(`正在离线转录 ${filename}…`);
+    setTimeout(() => {
+      historyItems.unshift({
+        id: Date.now(), date: '今天', time: '刚刚', dur: '1:42', status: 'polished', tag: '已改写',
+        asr: document.getElementById('asrStatusLabel').textContent, llm: 'deepseek-chat',
+        raw: `[文件转录：${filename}] 本次评审确认首页采用三栏布局，历史页加入搜索与短标签，并新增 AI 模型与转录文件入口。`,
+        polished: `[${filename}] 本次评审确认：首页采用三栏布局，历史记录新增搜索与精简标签，并独立设置 AI 模型与转录文件板块。`,
+        debug: { model: 'deepseek-chat', key: 'sk-proj-••••••••4f2a', system: '整理会议记录并修正标点。', input: filename }
+      });
+      renderHistory();
+      showAppToast(`✓ ${filename} 转录完成，已归档到历史记录`);
+    }, 800);
+  }
+
+  // ===== ONBOARDING (Spokenly Immersive Style, platform-aware) =====
+  let tourPracticeDone = false, tourPermGranted = false;
+  function openTour(n) { tourStep = n; tourPracticeDone = false; renderTour(); document.getElementById('tourBackdrop').classList.add('show'); }
+  function closeTour() { document.getElementById('tourBackdrop').classList.remove('show'); }
+  function stepTour(d) {
+    tourStep += d;
+    if (tourStep >= 4) { closeTour(); showAppToast('引导完成，随时可从左下角「进入引导」重走'); return; }
+    if (tourStep < 0) tourStep = 0;
+    renderTour();
+  }
+  function tourGrantPerm() {
+    tourPermGranted = true;
+    renderTour();
+    showAppToast('系统权限已就绪');
+  }
+  function tourSimulateSpeak() {
+    tourPracticeDone = true;
+    renderTour();
+  }
+  function renderTour() {
+    const keyLabel = platform === 'mac' ? 'Right Option' : 'Ctrl + Shift + D';
+    const keySymbol = platform === 'mac' ? '⌥' : '⌨';
+    let html = '';
+    if (tourStep === 0) {
+      const permDesc = platform === 'mac'
+        ? '这样 Speaky 才能采集语音并在其他应用中输入文字。'
+        : '这样 Speaky 才能正常采集你的麦克风语音。';
+      const permRows = platform === 'mac'
+        ? `<div class="tour-perm-row"><span>麦克风权限</span><span class="tag ok">已开通 ✓</span></div>
+           <div class="tour-perm-row"><span>辅助功能（跨应用写入）</span><span class="tag ${tourPermGranted ? 'ok' : 'warn'}">${tourPermGranted ? '已开通 ✓' : '待授权'}</span></div>`
+        : `<div class="tour-perm-row"><span>麦克风权限</span><span class="tag ok">已开通 ✓</span></div>`;
+      html = `
+        <div class="tour-h1">Speaky 需要系统权限</div>
+        <div class="tour-sub">${permDesc}</div>
+        <div class="tour-perm-mock">${permRows}</div>
+        ${tourPermGranted || platform === 'win'
+          ? `<button class="tour-cta" onclick="stepTour(1)">继续</button>`
+          : `<button class="tour-cta" onclick="tourGrantPerm()">打开权限设置</button>`}
+      `;
+    } else if (tourStep === 1) {
+      html = `
+        <div class="tour-hero-badge">
+          <span style="font-size:38px;line-height:1">${keySymbol}</span>
+          <span style="font-size:12px;color:var(--muted)">${platform === 'mac' ? 'right option' : 'hotkey'}</span>
+        </div>
+        <div class="tour-h1">按住 <span class="keycap" style="font-size:22px;padding:4px 14px">${keyLabel}</span> 并说话</div>
+        <div class="tour-inline-links">
+          <button onclick="showAppToast('可在设置中自定义任意快捷键')">更改快捷键 ▾</button>
+          <button onclick="cycleLang();renderTour()">语言：${langs[langIdx]} ▾</button>
+          <button onclick="testMic()">默认麦克风 ▾</button>
+        </div>
+        <button class="tour-cta" onclick="stepTour(1)">试一试</button>
+      `;
+    } else if (tourStep === 2) {
+      if (!tourPracticeDone) {
+        html = `
+          <div class="tour-hero-badge">
+            <span style="font-size:38px;line-height:1">${keySymbol}</span>
+            <span style="font-size:12px;color:var(--muted)">${platform === 'mac' ? 'right option' : 'hotkey'}</span>
+          </div>
+          <div class="tour-h1">说出这句话，然后再次按 <span class="keycap" style="font-size:20px;padding:4px 12px">${keyLabel}</span></div>
+          <div class="tour-practice-box">嗨！我现在用语音打字，<u style="text-decoration-style:wavy;text-decoration-color:var(--accent)">呃</u>，快了四倍。</div>
+          <button class="tour-cta" onclick="tourSimulateSpeak()">模拟说完并自动改写</button>
+        `;
+      } else {
+        html = `
+          <div class="tour-hero-badge">
+            <span style="font-size:38px;line-height:1">${keySymbol}</span>
+            <span class="tour-hero-check">✓</span>
+          </div>
+          <div class="tour-h1">你刚刚就这样“打”出了这段话</div>
+          <div style="font-size:21px;color:var(--ink)">嗨，我现在用语音打字快了四倍。</div>
+          <div class="tour-sub" style="font-size:14.5px">15 个字符 · 3 秒 · 比打字快 4 倍（已自动去除口语赘词）</div>
+          <button class="tour-cta" onclick="stepTour(1)">继续</button>
+        `;
+      }
+    } else {
+      html = `
+        <div class="tour-hero-badge">
+          <span style="font-size:42px;color:var(--ok);font-weight:700">✓</span>
+        </div>
+        <div class="tour-h1">Speaky 已就绪</div>
+        <div class="tour-sub">打开任意应用，按下 <span class="keycap">${keyLabel}</span> 即可口述。随时可在左侧「AI 模型」切换离线或云端引擎。</div>
+        <div class="tour-autostart">
+          <span>登录时打开 Speaky</span>
+          <button class="switch on" onclick="this.classList.toggle('on')"></button>
+        </div>
+        <button class="tour-cta" onclick="stepTour(1)">完成</button>
+      `;
+    }
+    document.getElementById('tourBody').innerHTML = html;
+    document.querySelectorAll('#tourDots .tour-dot').forEach((d, i) => d.className = 'tour-dot' + (i === tourStep ? ' active' : (i < tourStep ? ' done' : '')));
+    document.getElementById('tourPrev').style.visibility = tourStep === 0 ? 'hidden' : 'visible';
+  }
+
+  function fmt(s) { return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }
+  let toastT = null;
+  function showAppToast(m) { const e = document.getElementById('appToast'); e.textContent = m; e.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => e.classList.remove('show'), 2500); }
+
+  renderModels();
+  renderHistory();
+  renderTerms();
+</script>
+</body>
+</html>
