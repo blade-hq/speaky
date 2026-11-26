@@ -2522,9 +2522,9 @@
             <div class="row-menu ${isMenu ? 'open' : ''}" onclick="event.stopPropagation()">
               <button onclick="openMenuId=null;retranscribe(${i.id})">↻ 重新转写</button>
               <button onclick="openMenuId=null;toggleHistDetail(${i.id})">☰ ${isOpen ? '收起详情' : '查看原文 / 改写'}</button>
-              <button onclick="openMenuId=null;renderHistory();showAppToast('已打开原始音频所在目录')">📁 打开所在目录</button>
+              <button onclick="openMenuId=null;renderHistory();showAppToast('已导出原始音频文件')">↓ 下载</button>
               <div class="menu-sep"></div>
-              <button class="danger" onclick="deleteHistItem(${i.id}, event)">🗑 删除记录</button>
+              <button class="danger" onclick="deleteHistItem(${i.id}, event)">✕ 删除记录</button>
             </div>
 
             <div class="hist-detail ${isOpen ? 'open' : ''}">
