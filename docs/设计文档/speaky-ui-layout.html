@@ -1649,7 +1649,6 @@
         <button class="nav-item" data-page="history" onclick="switchPage('history')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           历史记录
-          <span class="nav-badge" id="pendingBadge" title="有待重新转写的录音">1</span>
         </button>
         <button class="nav-item" data-page="terms" onclick="switchPage('terms')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
@@ -2465,10 +2464,6 @@
   });
 
   function renderHistory() {
-    const pending = historyItems.filter(i => i.status === 'cancelled').length;
-    const badge = document.getElementById('pendingBadge');
-    badge.textContent = pending; badge.style.display = pending ? 'inline-flex' : 'none';
-
     const items = historyItems.filter(i => {
       if (histFilter !== 'all' && i.status !== histFilter) return false;
       if (histQuery) {
