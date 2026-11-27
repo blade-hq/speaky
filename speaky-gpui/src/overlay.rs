@@ -328,7 +328,6 @@ pub(super) fn show_panel(
     use windows::Win32::{
         Foundation::POINT,
         Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL},
-        UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
     };
 
     let monitor = windows_floating::active_monitor();
@@ -344,15 +343,7 @@ pub(super) fn show_panel(
         });
     let work =
         windows_floating::monitor_work_area(monitor).ok_or("无法取得字幕悬浮窗的工作区。")?;
-    let (mut dpi_x, mut dpi_y) = (0, 0);
-    let scale = if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
-        .is_ok()
-        && dpi_x != 0
-    {
-        dpi_x as f32 / 96.
-    } else {
-        window.scale_factor()
-    };
+    let scale = windows_floating::monitor_scale(monitor, window.scale_factor());
     let device_px = |length: Pixels| (f32::from(length) * scale).round() as i32;
     let width = device_px(bounds.size.width).min(work.right - work.left);
     let height = device_px(bounds.size.height).min(work.bottom - work.top);

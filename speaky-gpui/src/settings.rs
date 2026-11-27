@@ -611,6 +611,7 @@ impl Speaky {
     pub(crate) fn open_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.cancel_shortcut_capture(cx);
         if page != self.page {
+            self.model_picker.close();
             self.clear_feedback(self.page);
             self.settings.notice = None;
             self.tour.request_reveal();

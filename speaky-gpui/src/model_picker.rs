@@ -801,7 +801,7 @@ impl Speaky {
                 div()
                     .flex_none()
                     .text_color(rgb(MUTED()))
-                    .child(if picker.selected.is_some() {
+                    .child(if picker.selected.is_some() && !cfg!(target_vendor = "win7") {
                         "模型 · GPU"
                     } else {
                         "模型"

@@ -552,7 +552,9 @@ impl Speaky {
                             }
                             if !practice {
                                 if let Some(handle) = view.overlay {
-                                    let _ = handle.update(cx, |panel, _, cx| panel.recording_started(cx));
+                                    let _ = handle.update(cx, |panel, _, cx| {
+                                        panel.recording_started(cx);
+                                    });
                                 } else {
                                     view.show_recording_overlay(cx);
                                 }
@@ -1521,7 +1523,14 @@ fn main() {
             });
         #[cfg(not(windows))]
         let display_id = None;
-        let bounds = Bounds::centered(display_id, size(px(1120.), px(740.)), cx);
+        let window_size = size(px(1120.), px(740.));
+        #[cfg(target_vendor = "win7")]
+        let window_size = {
+            let display = Bounds::maximized(display_id, cx).size;
+            let viewport = size(display.width - px(24.), display.height - px(56.));
+            window_size.min(&viewport.max(&size(px(665.), px(435.))))
+        };
+        let bounds = Bounds::centered(display_id, window_size, cx);
         let window = cx
             .open_window(
                 WindowOptions {

@@ -2,6 +2,51 @@
 
 适用环境为 Windows 7 SP1 x64。解压 `Speaky-Windows7-x64.zip` 后双击 `speaky-win7.exe`。发布包静态链接 Visual C++ 运行库，无需单独安装。录音悬浮窗和桌面按钮使用 Direct2D 软件绘制，关闭 Aero 也可使用。
 
+原生 Win7 版支持在首页选择识别模型、测试麦克风和识别服务、查看历史记录，以及用已配置的服务转写 WAV 文件。可在设置中切换浅色和暗色。
+
+## 构建共用桌面界面的 Win7 版
+
+GPUI 版与 Win10/Win11 共用界面源码。目标系统为 Windows 7 SP1 x64，需有可用的 Direct3D 11 环境。它是独立构建，按上文安装的原生客户端仍能使用。
+
+在现代 Windows 构建机安装 Git、GNU 版 Rust 工具链和 `rust-src`、MinGW-w64（例如 w64devkit）以及 Windows SDK 的 x64 `fxc.exe`。将工具路径整理为以下布局，其中 `cargo` 和 `rustup` 分别对应构建环境的 `CARGO_HOME` 和 `RUSTUP_HOME`。
+
+```text
+<工具目录>\
+  cargo\bin\cargo.exe
+  rustup\toolchains\stable-x86_64-pc-windows-gnu\
+  w64devkit\bin\x86_64-w64-mingw32-gcc.exe
+  w64devkit\bin\objdump.exe
+  windows-sdk\x64\fxc.exe
+```
+
+用此工具链执行 `cargo fetch --locked` 准备依赖。运行以下命令构建当前 Git 提交。可用 `-Fxc` 或 `-GpuiCrate` 指定不同位置的输入文件，依赖齐全后加 `-Offline` 可离线构建。
+
+```powershell
+.\scripts\build-win7-gpui.ps1 -ToolRoot 'C:\tools\speaky-win7'
+```
+
+脚本在 `target\win7-gpui` 内应用固定版本的 GPUI 补丁，并检查生成程序的 Win7 系统导入和窗口子系统。把 `target\win7-gpui\cargo\x86_64-win7-windows-gnu\debug\speaky-gpui.exe` 复制到 Win7 上的独立目录，双击即可打开。常规 Win10/Win11 构建继续使用 crates.io 的 GPUI。
+
+### 在 Win7 上运行离线 Vosk 模型
+
+在 `speaky-gpui.exe` 旁创建 `packs\vosk-small-cn-win7-x64`，把 `scripts\win7-gpui\vosk\manifest.json` 放入包根目录。用 Win7 兼容的 x64 Vosk 运行库与 `vosk-model-small-cn-0.22` 模型准备下列文件。
+
+```text
+packs\vosk-small-cn-win7-x64\
+  manifest.json
+  model\                       ← 解压后的模型文件
+  runtime\vosk-server.exe
+  runtime\libvosk.dll           ← 同目录放置运行库所需 DLL
+```
+
+使用上面的 MinGW-w64 编译 `scripts\win7-gpui\vosk\server.c`，将输出放进 `runtime`。
+
+```powershell
+x86_64-w64-mingw32-gcc -O2 -static scripts/win7-gpui/vosk/server.c -o vosk-server.exe -lws2_32 '-Wl,--major-subsystem-version,6,--minor-subsystem-version,1'
+```
+
+打开 GPUI 版「模型选择 → 语音转文字」，选择 Vosk 中文离线识别并测试内置样本。CPU 服务只监听 Win7 自己的回环地址，文件和模型可一次复制到离线环境使用。
+
 ## 连接内网语音识别服务
 
 1. 确认识别服务已启动，Win7 电脑可以访问它的地址和端口。

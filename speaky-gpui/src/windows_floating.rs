@@ -57,6 +57,12 @@ pub(super) fn active_monitor() -> HMONITOR {
     unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST) }
 }
 
+#[cfg(target_vendor = "win7")]
+pub(super) fn monitor_scale(_monitor: HMONITOR, fallback: f32) -> f32 {
+    fallback
+}
+
+#[cfg(not(target_vendor = "win7"))]
 pub(super) fn monitor_scale(monitor: HMONITOR, fallback: f32) -> f32 {
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     let (mut x, mut y) = (0, 0);
@@ -191,6 +197,8 @@ pub(super) fn show(
             drop(Rc::from_raw(data));
             return Err("无法配置悬浮窗鼠标操作。".into());
         }
+        #[cfg(target_vendor = "win7")]
+        clip_win7_popup(hwnd, width, height, drag.filename, window.scale_factor());
         SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -204,6 +212,34 @@ pub(super) fn show(
     }
     keep_visible(hwnd);
     Ok(())
+}
+
+#[cfg(target_vendor = "win7")]
+fn clip_win7_popup(hwnd: HWND, width: i32, height: i32, position_file: &str, scale: f32) {
+    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+
+    let diameter = match position_file {
+        "floating-position.json" => height,
+        "caption-position.json" => (40. * scale).round() as i32,
+        _ => return,
+    }
+    .min(width)
+    .min(height);
+    if diameter <= 0 {
+        return;
+    }
+
+    // The Win7 HWND swap chain presents the pixels outside GPUI's rounded surface.
+    unsafe {
+        let region = CreateRoundRectRgn(0, 0, width, height, diameter, diameter);
+        if region.is_invalid() {
+            log::warn!("无法创建 Win7 悬浮窗的裁剪区域。");
+        } else if SetWindowRgn(hwnd, Some(region), false) == 0 {
+            // Win32 takes ownership only when SetWindowRgn succeeds.
+            let _ = DeleteObject(region.into());
+            log::warn!("无法应用 Win7 悬浮窗的裁剪区域。");
+        }
+    }
 }
 
 fn keep_visible(hwnd: HWND) {

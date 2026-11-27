@@ -738,6 +738,7 @@ impl Speaky {
     fn v30_runtime(&self, settings: &config::Config, cx: &mut Context<Self>) -> Div {
         let mic = self.microphone_label(&settings.core.asr);
         let level = self.diagnostic_level();
+        #[cfg(not(target_vendor = "win7"))]
         let asr = model_picker::selected_label(settings);
         let rewrite = settings.llm.organizer_service();
         let llm = if settings.llm.enabled && !rewrite.model.is_empty() {
@@ -839,11 +840,21 @@ impl Speaky {
                     .items_center()
                     .gap_1()
                     .children(self.tour.mark(Anchor::Model))
-                    .child(div().min_w(px(0.)).flex_1().text_size(px(12.)).child(asr))
+                    .child({
+                        #[cfg(target_vendor = "win7")]
+                        let selector = self.model_picker_button(cx);
+                        #[cfg(not(target_vendor = "win7"))]
+                        let selector = div().text_size(px(12.)).child(asr);
+                        div().min_w(px(0.)).flex_1().child(selector)
+                    })
                     .child(button("测试", false).id("v30-home-test-asr").on_click(
                         cx.listener(|view, _, _, cx| view.check_recognition_service(cx)),
                     )),
             )
+            .when(cfg!(target_vendor = "win7"), |body| {
+                body.children(self.model_picker_panel(cx))
+                    .children(self.model_load_notice(false, cx))
+            })
             .when_some(self.settings_notice(), |body, result| {
                 let (text, color) = match result {
                     Ok(text) => (text, MUTED()),
