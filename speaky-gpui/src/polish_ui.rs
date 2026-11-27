@@ -1,7 +1,4 @@
-use crate::{
-    button, config::Config, drafts, polish, polish_benchmark, polish_preferences, settings::detail,
-    Speaky,
-};
+use crate::{button, config::Config, drafts, polish, polish_benchmark, settings::detail, Speaky};
 use gpui::{div, prelude::*, px, ClipboardItem, Context, Div};
 use std::path::PathBuf;
 
@@ -18,37 +15,6 @@ pub(crate) struct BenchmarkResult {
 }
 
 impl Speaky {
-    pub(crate) fn rate_organized(
-        &mut self,
-        path: &std::path::Path,
-        good: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !Config::load().is_ok_and(|config| config.llm.learns_preferences()) {
-            return;
-        }
-        let result = (|| {
-            let entry = self.archive.iter().find(|entry| entry.path == path)?;
-            let organized = entry.organized.as_ref()?;
-            let drafts::State::Transcribed { text } = &entry.state else {
-                return None;
-            };
-            if text != &organized.source {
-                return None;
-            }
-            let sample = path.file_stem()?.to_str()?;
-            let profile = organized.profile?;
-            Some(
-                polish_preferences::load(&organized.model_settings())
-                    .and_then(|mut preferences| preferences.record(sample, profile, good)),
-            )
-        })();
-        if let Some(result) = result {
-            self.organizer.notice = result.err().map(|error| (path.to_owned(), error));
-            cx.notify();
-        }
-    }
-
     pub(crate) fn organize_transcript(
         &mut self,
         path: PathBuf,
@@ -118,45 +84,20 @@ impl Speaky {
             .when_some(entry.organized.as_ref(), |body, result| {
                 let text = result.text.clone();
                 let profile = result.profile;
-                let sample = entry
-                    .path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_owned);
-                let path = entry.path.clone();
-                let mut actions = div().flex().gap_1().flex_wrap().child(
-                    button("复制整理稿", false)
-                        .id("copy-organized")
-                        .invisible()
-                        .group_hover("history-row", |style| style.visible())
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
-                        })),
-                );
+                let copy = button("复制整理稿", false)
+                    .id("copy-organized")
+                    .invisible()
+                    .group_hover("history-row", |style| style.visible())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                    }));
                 let current = result.source == source;
-                if let (Some(sample), Some(profile)) = (
-                    sample.filter(|_| current && self.organizer_learning),
-                    profile,
-                ) {
-                    let vote = polish_preferences::load(&result.model_settings())
-                        .ok()
-                        .and_then(|preferences| preferences.vote(&sample, profile));
-                    actions =
-                        actions.children([("好", true), ("不好", false)].map(|(label, good)| {
-                            let path = path.clone();
-                            button(label, vote == Some(good))
-                                .id(label)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.rate_organized(&path, good, cx);
-                                }))
-                        }));
-                }
                 body.child(
                     div()
                         .mt_1()
                         .pl_2()
                         .border_l_1()
-                        .border_color(gpui::rgb(crate::BORDER))
+                        .border_color(gpui::rgb(crate::BORDER()))
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -167,7 +108,7 @@ impl Speaky {
                         )))
                         .when(!current, |body| body.child(detail("来自上一版转写")))
                         .child(result.text.clone())
-                        .child(actions),
+                        .child(div().flex().child(copy)),
                 )
             })
     }
@@ -178,10 +119,10 @@ impl Speaky {
         }
         let setup = (|| {
             let config = Config::load().map_err(|_| "无法读取整理配置。")?;
-            if !config.llm.enabled {
-                return Err("请在设置中启用语音整理。".to_owned());
+            if !crate::settings::rewrite_configured(&config) {
+                return Err("请先配置整理服务。".to_owned());
             }
-            Ok(config.llm.openai)
+            Ok(config.llm.organizer_service().into_owned())
         })();
         let service = match setup {
             Ok(setup) => setup,
@@ -240,7 +181,7 @@ impl Speaky {
                 .children(report.cases.iter().map(|case| {
                     div()
                         .border_t_1()
-                        .border_color(gpui::rgb(crate::BORDER))
+                        .border_color(gpui::rgb(crate::BORDER()))
                         .pt_2()
                         .child(format!(
                             "{} · {:.2} 秒",

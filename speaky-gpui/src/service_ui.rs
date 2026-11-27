@@ -4,7 +4,54 @@ pub struct ServiceInput {
     pub api_key: Option<String>,
 }
 
-type EditResult = tokio::sync::oneshot::Receiver<Result<Option<ServiceInput>, String>>;
+type EditResult<T = ServiceInput> = tokio::sync::oneshot::Receiver<Result<Option<T>, String>>;
+
+const AUTODL_KEY_TITLE: &str = "配置 AutoDL API 密钥";
+
+fn autodl_key_help(has_key: bool) -> &'static str {
+    if has_key {
+        "语音转写和 AI 润色共用此密钥。留空可保留已保存的密钥。"
+    } else {
+        "填入 AutoDL 的 API 密钥，语音转写和 AI 润色可共用。"
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn edit_autodl_key(
+    window: &mut gpui::Window,
+    has_key: bool,
+) -> Result<EditResult<String>, String> {
+    crate::windows_dialog::edit(
+        window,
+        104,
+        AUTODL_KEY_TITLE,
+        autodl_key_help(has_key),
+        [String::new()],
+        |[key]| key.trim().to_owned(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(super) use macos::edit_autodl_key;
+
+#[cfg(windows)]
+pub(super) const VOLC_URL: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+
+#[cfg(windows)]
+pub(super) fn edit_volc(window: &gpui::Window, resource_id: &str) -> Result<EditResult, String> {
+    crate::windows_dialog::edit(
+        window,
+        101,
+        "配置 Doubao 语音识别",
+        "服务地址固定为火山引擎。模型 ID 填资源 ID，密钥留空沿用已有凭证。",
+        [VOLC_URL.to_owned(), resource_id.to_owned(), String::new()],
+        |[base_url, model, key]| ServiceInput {
+            base_url,
+            model,
+            api_key: (!key.trim().is_empty()).then_some(key),
+        },
+    )
+}
 
 #[cfg(target_os = "macos")]
 pub use macos::edit_model;
@@ -44,7 +91,7 @@ pub fn edit_model(
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
 mod macos {
-    use super::{EditResult, ServiceInput};
+    use super::{autodl_key_help, EditResult, ServiceInput, AUTODL_KEY_TITLE};
     use block::ConcreteBlock;
     use objc::{class, msg_send, rc::StrongPtr, runtime::Object, sel, sel_impl};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -54,12 +101,87 @@ mod macos {
     const UTF8: usize = 4;
     const SAVE: isize = 1000;
 
+    struct Field<'a> {
+        caption: &'static str,
+        value: &'a str,
+        placeholder: &'static str,
+        secure: bool,
+    }
+
+    pub fn edit_autodl_key(
+        window: &mut gpui::Window,
+        has_key: bool,
+    ) -> Result<EditResult<String>, String> {
+        edit_fields(
+            window,
+            AUTODL_KEY_TITLE,
+            autodl_key_help(has_key),
+            [Field {
+                caption: "API 密钥",
+                value: "",
+                placeholder: "AutoDL API Key",
+                secure: true,
+            }],
+            |[key]| unsafe { field_text(**key) },
+        )
+    }
+
     pub fn edit_model(
         window: &mut gpui::Window,
         base_url: &str,
         model: &str,
         organizer: bool,
     ) -> Result<EditResult, String> {
+        let (title, help, service_caption, example) = if organizer {
+            (
+                "编辑整理模型",
+                "填写 OpenAI 兼容服务的基础地址和模型 ID。\n同一服务器可留空沿用原密钥。更换服务器请填入该服务器的密钥，无鉴权服务可填 EMPTY。",
+                "服务地址（Base URL）",
+                "gpt-4o-mini",
+            )
+        } else {
+            (
+                "自动检测识别服务",
+                "保存时自动识别接入方式并转写内置样本。同一服务可留空沿用原密钥。",
+                "服务地址（HTTP 或 WebSocket）",
+                "OpenAI 兼容服务可填模型 ID",
+            )
+        };
+        edit_fields(
+            window,
+            title,
+            help,
+            [
+                Field {
+                    caption: service_caption,
+                    value: base_url,
+                    placeholder: "https://api.example.com/v1",
+                    secure: false,
+                },
+                Field {
+                    caption: "模型 ID",
+                    value: model,
+                    placeholder: example,
+                    secure: false,
+                },
+                Field {
+                    caption: "API Key（选填）",
+                    value: "",
+                    placeholder: "同一服务地址可留空沿用原密钥",
+                    secure: true,
+                },
+            ],
+            |[base, model, key]| unsafe { read_form(base, model, key) },
+        )
+    }
+
+    fn edit_fields<const N: usize, T: 'static>(
+        window: &mut gpui::Window,
+        title: &str,
+        help: &str,
+        fields: [Field<'_>; N],
+        read: impl Fn(&[StrongPtr; N]) -> Result<T, String> + 'static,
+    ) -> Result<EditResult<T>, String> {
         let raw_handle =
             HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
         let RawWindowHandle::AppKit(handle) = raw_handle.as_raw() else {
@@ -83,66 +205,43 @@ mod macos {
             let alert = StrongPtr::new(alert);
             let form: *mut Object = msg_send![class!(NSView), alloc];
             let form: *mut Object =
-                msg_send![form, initWithFrame: Rect::new(0., 0., FORM_WIDTH, 168.)];
+                msg_send![form, initWithFrame: Rect::new(0., 0., FORM_WIDTH, 56. * N as f64)];
             let form = StrongPtr::new(form);
-            let base_field = add_field(
-                *form,
-                126.,
-                if organizer {
-                    "服务地址（Base URL）"
-                } else {
-                    "服务地址（HTTP 或 WebSocket）"
-                },
-                base_url,
-                "https://api.example.com/v1",
-                false,
-            );
-            let example = if organizer {
-                "gpt-4o-mini"
-            } else {
-                "OpenAI 兼容服务可填模型 ID"
-            };
-            let model_field = add_field(*form, 70., "模型 ID", model, example, false);
-            let key_field = add_field(
-                *form,
-                14.,
-                "API Key（选填）",
-                "",
-                "同一服务地址可留空沿用原密钥",
-                true,
-            );
-            let title = if organizer {
-                "编辑整理模型"
-            } else {
-                "自动检测识别服务"
-            };
-            let _: () = msg_send![*alert, setMessageText: ns_string(title)];
-            let help = ns_string(if organizer {
-                "填写 OpenAI 兼容服务的基础地址和模型 ID。\n同一服务器可留空沿用原密钥。更换服务器请填入该服务器的密钥，无鉴权服务可填 EMPTY。"
-            } else {
-                "保存时自动识别接入方式并转写内置样本。同一服务可留空沿用原密钥。"
+            let controls = std::array::from_fn(|index| {
+                let field = &fields[index];
+                add_field(
+                    *form,
+                    14. + 56. * (N - index - 1) as f64,
+                    field.caption,
+                    field.value,
+                    field.placeholder,
+                    field.secure,
+                )
             });
-            let _: () = msg_send![*alert, setInformativeText: help];
+            let _: () = msg_send![*alert, setMessageText: ns_string(title)];
+            let _: () = msg_send![*alert, setInformativeText: ns_string(help)];
             let _: () = msg_send![*alert, setAccessoryView: *form];
             let save: *mut Object = msg_send![*alert, addButtonWithTitle: ns_string("保存")];
             let cancel: *mut Object = msg_send![*alert, addButtonWithTitle: ns_string("取消")];
             let _: () = msg_send![cancel, setKeyEquivalent: ns_string("\u{1b}")];
 
             let alert_window: *mut Object = msg_send![*alert, window];
-            let _: () = msg_send![alert_window, setInitialFirstResponder: *base_field];
-            let _: () = msg_send![*base_field, setNextKeyView: *model_field];
-            let _: () = msg_send![*model_field, setNextKeyView: *key_field];
-            let _: () = msg_send![*key_field, setNextKeyView: save];
+            let first = *controls[0];
+            let _: () = msg_send![alert_window, setInitialFirstResponder: first];
+            for fields in controls.windows(2) {
+                let _: () = msg_send![*fields[0], setNextKeyView: *fields[1]];
+            }
+            let _: () = msg_send![*controls[N - 1], setNextKeyView: save];
             let _: () = msg_send![save, setNextKeyView: cancel];
-            let _: () = msg_send![cancel, setNextKeyView: *base_field];
-            let _: objc::runtime::BOOL = msg_send![alert_window, makeFirstResponder: *base_field];
+            let _: () = msg_send![cancel, setNextKeyView: first];
+            let _: objc::runtime::BOOL = msg_send![alert_window, makeFirstResponder: first];
 
             let complete = ConcreteBlock::new(move |answer: isize| {
                 if let Some(send) = send.take() {
                     let result = if answer == SAVE {
                         let _: objc::runtime::BOOL =
                             msg_send![alert_window, makeFirstResponder: null_mut::<Object>()];
-                        read_form(&base_field, &model_field, &key_field).map(Some)
+                        read(&controls).map(Some)
                     } else {
                         Ok(None)
                     };

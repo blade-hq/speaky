@@ -50,7 +50,7 @@ impl BenchmarkPage {
 fn section_label(label: impl Into<gpui::SharedString>) -> Div {
     div()
         .text_size(px(12.))
-        .text_color(rgb(MUTED))
+        .text_color(rgb(MUTED()))
         .child(label.into())
 }
 
@@ -184,6 +184,7 @@ impl Speaky {
                     ))
                     .child(self.model_picker_button(cx)),
             )
+            .children(self.model_load_notice(false, cx))
             .when_some(self.model_picker_panel(cx), |page, panel| page.child(panel));
         if let Some(error) = &state.load_error {
             return page.child(
@@ -194,7 +195,7 @@ impl Speaky {
                     .child(
                         div()
                             .flex_1()
-                            .text_color(rgb(crate::ERROR))
+                            .text_color(rgb(crate::ERROR()))
                             .child(error.clone()),
                     )
                     .child(
@@ -239,13 +240,17 @@ impl Speaky {
                             .px_2()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(if state.show_samples { ACCENT } else { BORDER }))
-                            .bg(rgb(SIDEBAR))
+                            .border_color(rgb(if state.show_samples {
+                                ACCENT()
+                            } else {
+                                BORDER()
+                            }))
+                            .bg(rgb(SIDEBAR()))
                             .flex()
                             .items_center()
                             .gap_2()
                             .cursor_pointer()
-                            .hover(|s| s.border_color(rgb(ACCENT)))
+                            .hover(|s| s.border_color(rgb(ACCENT())))
                             .child(div().flex_none().child(format!(
                                 "第 {} / {} 条",
                                 index + 1,
@@ -255,7 +260,7 @@ impl Speaky {
                                 div()
                                     .flex_1()
                                     .truncate()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(MUTED()))
                                     .child(sample.expected.clone()),
                             )
                             .child(if state.show_samples { "▴" } else { "▾" })
@@ -294,7 +299,7 @@ impl Speaky {
                     .overflow_y_scroll()
                     .p_1()
                     .rounded_md()
-                    .bg(rgb(SIDEBAR))
+                    .bg(rgb(SIDEBAR()))
                     .children(set.cases.iter().enumerate().map(|(i, s)| {
                         div()
                             .id(("benchmark-sample", i))
@@ -305,12 +310,14 @@ impl Speaky {
                             .gap_2()
                             .rounded_md()
                             .cursor_pointer()
-                            .when(i == index, |row| row.bg(rgba(0x28584828)))
-                            .hover(|style| style.bg(rgba(0x28584835)))
+                            .when(i == index, |row| {
+                                row.bg(rgba(crate::theme::rgba(ACCENT(), 0x28)))
+                            })
+                            .hover(|style| style.bg(rgba(crate::theme::rgba(ACCENT(), 0x35))))
                             .child(
                                 div()
                                     .w(px(33.))
-                                    .text_color(rgb(ACCENT))
+                                    .text_color(rgb(ACCENT()))
                                     .child(format!("#{}", i + 1)),
                             )
                             .child(
@@ -392,15 +399,15 @@ impl Speaky {
                 .gap_2()
                 .child(actions)
                 .when_some(state.playback_error.as_ref(), |c, e| {
-                    c.child(div().text_color(rgb(crate::ERROR)).child(e.clone()))
+                    c.child(div().text_color(rgb(crate::ERROR())).child(e.clone()))
                 })
                 .child(div().mt_1().child(section_label("人工参考")))
-                .child(div().text_color(rgb(INK)).child(sample.expected.clone()))
+                .child(div().text_color(rgb(INK())).child(sample.expected.clone()))
                 .child(
                     div()
                         .mt_2()
                         .border_t_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(BORDER()))
                         .pt_2()
                         .child(section_label(match key {
                             Some(k) => format!("模型输出 · {}", k.model.label()),
@@ -410,9 +417,9 @@ impl Speaky {
                 .child(match (pending, result) {
                     (true, _) => section_label("识别中…"),
                     (_, Some(Ok(text))) if text.is_empty() => section_label("模型返回了空文本。"),
-                    (_, Some(Ok(text))) => div().text_color(rgb(INK)).child(text.clone()),
+                    (_, Some(Ok(text))) => div().text_color(rgb(INK())).child(text.clone()),
                     (_, Some(Err(error))) => {
-                        div().text_color(rgb(crate::ERROR)).child(error.clone())
+                        div().text_color(rgb(crate::ERROR())).child(error.clone())
                     }
                     (_, None) => section_label("尚未识别"),
                 }),

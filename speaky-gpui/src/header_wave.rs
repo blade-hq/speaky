@@ -105,7 +105,7 @@ impl Render for HeaderWave {
                         point(bounds.origin.x, mid_y - px(0.5)),
                         size(px(width), px(1.)),
                     ),
-                    rgba(0x2858482b),
+                    rgba(crate::theme::rgba(ACCENT(), 0x2b)),
                 ));
                 let spacing = (width - 18.) / (ENVELOPE.len() - 1) as f32;
                 for (index, envelope) in ENVELOPE.into_iter().enumerate() {
@@ -125,9 +125,9 @@ impl Render for HeaderWave {
                     let magnitude = drive + (0.68 - 0.33 * drive) * hover;
                     let bar_height = (2.8 + (height - 5.) * magnitude).min(height - 2.);
 
-                    let mut tint = rgb(0x11846a);
+                    let mut tint = rgb(crate::theme::choose(0x83a0ff, 0x11846a));
                     tint.a = hover;
-                    let mut color = rgb(ACCENT).blend(tint);
+                    let mut color = rgb(ACCENT()).blend(tint);
                     color.a = (0.27 + 0.51 * envelope + 0.23 * voice + 0.56 * hover).min(1.);
                     let mut bar = fill(
                         Bounds::new(

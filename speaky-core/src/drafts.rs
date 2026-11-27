@@ -8,8 +8,11 @@ use std::time::SystemTime;
 pub struct Entry {
     pub path: PathBuf,
     pub modified: Option<SystemTime>,
+    pub recorded_at: Option<SystemTime>,
     pub duration_seconds: u64,
+    pub duration_millis: u64,
     pub state: State,
+    pub original_text: Option<String>,
     pub recognized_at: Option<SystemTime>,
     pub recognizer: Option<String>,
     pub organized: Option<Organized>,
@@ -29,16 +32,6 @@ pub struct Organized {
     pub base_url: String,
     pub model: String,
     pub profile: Option<crate::polish::Profile>,
-}
-
-impl Organized {
-    pub fn model_settings(&self) -> crate::config::LlmOpenAIConfig {
-        crate::config::LlmOpenAIConfig {
-            base_url: self.base_url.clone(),
-            model: self.model.clone(),
-            api_key: String::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -229,14 +222,20 @@ pub(super) fn list_in(directory: &Path) -> Vec<Entry> {
                 return None;
             }
             let metadata = entry.metadata().ok()?;
-            (metadata.is_file() && metadata.len() > 44)
-                .then(|| (metadata.modified().ok(), path, metadata.len()))
+            (metadata.is_file() && metadata.len() > 44).then(|| {
+                (
+                    metadata.modified().ok(),
+                    path,
+                    metadata.len(),
+                    metadata.created().ok(),
+                )
+            })
         })
         .collect::<Vec<_>>();
     drafts.sort_unstable_by(|left, right| right.cmp(left));
     drafts
         .into_iter()
-        .map(|(modified, path, bytes)| {
+        .map(|(modified, path, bytes, created)| {
             let transcript = read_transcript(&path).unwrap_or_default();
             let organized = fs::read(path.with_extension("polish.json"))
                 .ok()
@@ -245,8 +244,11 @@ pub(super) fn list_in(directory: &Path) -> Vec<Entry> {
             Entry {
                 path,
                 modified,
+                recorded_at: created.or(modified),
                 duration_seconds: (bytes - 44) / (16_000 * 2),
+                duration_millis: (bytes - 44).saturating_mul(1_000) / (16_000 * 2),
                 state: transcript.state,
+                original_text: transcript.original_text,
                 recognized_at: transcript.recognized_at,
                 recognizer: transcript.recognizer.map(recorded_model_name),
                 organized,

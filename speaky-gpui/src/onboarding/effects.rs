@@ -53,7 +53,7 @@ pub(super) fn lighting(
     }
     let strength = ring * if frame.moving { 0.85 } else { 0.65 };
     if frame.scene == Scene::Welcome {
-        let spread = ease_out(frame.part((40., 830.)));
+        let spread = ease_out(frame.part((20., 445.)));
         let halo = centered(
             focus.center(),
             px(110. + 238. * spread),
@@ -73,7 +73,7 @@ pub(super) fn lighting(
         );
     } else {
         glow(window, focus, px(29.), tint(MINT).opacity(strength * 0.18));
-        if frame.scene == Scene::Model {
+        if matches!(frame.scene, Scene::Model | Scene::ModelReady) {
             let corner = centered(
                 point(focus.right() - px(14.), focus.top() + px(8.)),
                 px(70.),
@@ -81,11 +81,25 @@ pub(super) fn lighting(
             );
             glow(window, corner, px(31.), tint(GOLD).opacity(strength * 0.20));
         }
+        if frame.moving
+            && matches!(
+                frame.scene,
+                Scene::ShortcutReady | Scene::ModelReady | Scene::FloatingReady
+            )
+        {
+            let glow_amount = 1. - frame.part((70., 500.));
+            glow(
+                window,
+                focus.dilate(px(3.)),
+                px(34.),
+                tint(MINT).opacity(0.32 * glow_amount),
+            );
+        }
         if matches!(frame.scene, Scene::Record | Scene::Live) {
             if let Some(button) = record_button {
                 let breath = if frame.moving && frame.scene == Scene::Record {
-                    let beat = frame.part((190., 1430.));
-                    (beat * std::f32::consts::TAU).sin().abs() * (1. - beat * 0.29)
+                    let beat = frame.part((60., 595.));
+                    (beat * std::f32::consts::PI).sin()
                 } else {
                     0.
                 };
@@ -118,12 +132,15 @@ pub(super) fn ribbon(
 ) {
     if !frame.moving
         || frame.scene != Scene::Transcript
-        || !matches!(frame.previous, Scene::Record | Scene::Live)
+        || !matches!(
+            frame.previous,
+            Scene::Record | Scene::Live | Scene::Processing
+        )
     {
         return;
     }
-    let head = ease_out(frame.part((95., 690.)));
-    let strength = frame.part((75., 165.)) * (1. - frame.part((530., 780.)));
+    let head = ease_out(frame.part((25., 480.)));
+    let strength = frame.part((25., 115.)) * (1. - frame.part((360., 565.)));
     if strength <= 0.01 {
         return;
     }
@@ -158,7 +175,7 @@ pub(super) fn ribbon(
     }
 }
 
-pub(super) fn signal(frame: Frame, height: f32, hero: bool) -> impl IntoElement {
+pub(super) fn signal(frame: Frame, height: f32) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, (), window, _| {
@@ -169,11 +186,11 @@ pub(super) fn signal(frame: Frame, height: f32, hero: bool) -> impl IntoElement 
                     point(bounds.left(), middle),
                     size(bounds.size.width, px(1.)),
                 ),
-                tint(if hero { MINT } else { 0x3f8065 }).opacity(0.19),
+                tint(MINT).opacity(0.19),
             ));
-            let count = if hero { 41 } else { 29 };
-            let color = tint(if hero { MINT } else { 0x3b8164 });
-            let travel = frame.part(if hero { (90., 870.) } else { (235., 1050.) });
+            let count = 41;
+            let color = tint(MINT);
+            let travel = frame.part((35., 510.));
             for index in 0..count {
                 let u = index as f32 / (count - 1) as f32;
                 let form = (std::f32::consts::PI * u).sin().powi(2);
@@ -187,10 +204,7 @@ pub(super) fn signal(frame: Frame, height: f32, hero: bool) -> impl IntoElement 
                 let x = bounds.left() + bounds.size.width * u - px(1.);
                 window.paint_quad(
                     fill(
-                        Bounds::new(
-                            point(x, middle - amplitude / 2.),
-                            size(px(if hero { 2.5 } else { 2. }), amplitude),
-                        ),
+                        Bounds::new(point(x, middle - amplitude / 2.), size(px(2.5), amplitude)),
                         color.opacity((0.25 + 0.66 * form) * (0.28 + 0.72 * front)),
                     )
                     .corner_radii(px(2.)),

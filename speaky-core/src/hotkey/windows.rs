@@ -136,7 +136,7 @@ pub(super) fn normalize(mut shortcut: Shortcut) -> Result<Shortcut, String> {
     Ok(shortcut)
 }
 
-fn key_and_modifiers(shortcut: Shortcut) -> Result<(u32, u32), String> {
+pub(super) fn key_and_modifiers(shortcut: Shortcut) -> Result<(u32, u32), String> {
     let (key, implicit) = match shortcut.key {
         Key::Character(c) => character_key(c)?,
         Key::Function(n) => (VK_F1 as u8 + n - 1, 0),

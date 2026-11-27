@@ -2,17 +2,22 @@ use crate::{
     config::{Config, OpenAIConfig},
     drafts,
     engines::OpenAIEngine,
+    model_load::ModelLoad,
 };
 use serde::Deserialize;
 use std::{
     env, fs,
     io::ErrorKind,
-    os::windows::process::CommandExt,
+    os::windows::{
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
+    time::Duration,
 };
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, CREATE_NO_WINDOW};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Model {
@@ -25,6 +30,8 @@ pub struct LocalEndpoint {
     pub id: String,
     base_url: String,
     use_vocabulary_prompt: bool,
+    #[serde(default)]
+    started: bool,
 }
 
 // A fresh GUI process must register its own lifetime with the runtime. Saved
@@ -62,6 +69,7 @@ fn helper_path() -> Result<PathBuf, String> {
 fn run_helper<T: serde::de::DeserializeOwned>(
     action: &str,
     model: Option<&str>,
+    load: Option<&ModelLoad>,
 ) -> Result<T, String> {
     let script = helper_path()?;
     let powershell = PathBuf::from(env::var_os("SystemRoot").ok_or("无法定位 Windows 目录。")?)
@@ -83,11 +91,47 @@ fn run_helper<T: serde::de::DeserializeOwned>(
     if let Some(id) = model {
         command.args(["-ModelId", id]);
     }
-    let output = command
-        .output()
-        .map_err(|e| format!("启动本地模型组件失败：{e}"))?;
+    let output = if let Some(load) = load {
+        load.check()?;
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("Local\\SpeakyLoad-{}-{id}", std::process::id());
+        let wide = name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let raw = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+        if raw.is_null() {
+            return Err(format!(
+                "无法启动可取消的模型加载：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let event = unsafe { OwnedHandle::from_raw_handle(raw) };
+        command.args(["-CancelId", &id]);
+        std::thread::scope(|scope| {
+            // Read both pipes while the load is active so a verbose child cannot block.
+            let helper = scope.spawn(|| command.output());
+            while !helper.is_finished() {
+                if load.is_cancelled() {
+                    if unsafe { SetEvent(event.as_raw_handle()) } == 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            helper
+                .join()
+                .map_err(|_| std::io::Error::other("本地模型助手意外退出。"))?
+        })
+    } else {
+        command.output()
+    }
+    .map_err(|e| format!("本地模型组件运行失败：{e}"))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
+        if let Some(load) = load.filter(|load| {
+            load.is_cancelled() && error.contains(crate::model_load::CANCELLED_MESSAGE)
+        }) {
+            load.check()?;
+        }
         let message = error
             .trim()
             .lines()
@@ -99,7 +143,7 @@ fn run_helper<T: serde::de::DeserializeOwned>(
 }
 
 pub fn list() -> Result<Vec<Model>, String> {
-    run_helper("List", None)
+    run_helper("List", None, None)
 }
 
 pub fn selected_id(config: &Config) -> Option<&str> {
@@ -131,6 +175,7 @@ pub fn selected_label(config: &Config) -> String {
         return id.to_owned();
     }
     match config.engine.current.as_str() {
+        "autodl" => crate::engines::AUTODL_ASR_MODEL.into(),
         "remote" => config.engine.remote.label(),
         "openai" => config.engine.openai.model.clone(),
         "volc_bigmodel" if !config.engine.volc_bigmodel.api_key.is_empty() => "火山引擎".into(),
@@ -151,13 +196,25 @@ impl LocalEndpoint {
 
 pub fn activate(id: &str) -> Result<LocalEndpoint, String> {
     let mut session = SESSION.lock().map_err(|_| "无法读取本地模型状态。")?;
-    prepare_model(id, &mut session)
+    prepare_model(id, &mut session, None)
 }
 
-fn prepare_model(id: &str, session: &mut Option<LocalEndpoint>) -> Result<LocalEndpoint, String> {
+pub fn activate_cancellable(id: &str, load: &ModelLoad) -> Result<LocalEndpoint, String> {
+    let mut session = SESSION.lock().map_err(|_| "无法读取本地模型状态。")?;
+    prepare_model(id, &mut session, Some(load))
+}
+
+fn prepare_model(
+    id: &str,
+    session: &mut Option<LocalEndpoint>,
+    load: Option<&ModelLoad>,
+) -> Result<LocalEndpoint, String> {
+    if let Some(load) = load {
+        load.check()?;
+    }
     // Switching may unload the old model even if starting the next one fails.
     *session = None;
-    let endpoint: LocalEndpoint = run_helper("Ensure", Some(id))?;
+    let endpoint: LocalEndpoint = run_helper("Ensure", Some(id), load)?;
     let url = reqwest::Url::parse(&endpoint.base_url).map_err(|_| "本地模型服务地址无效。")?;
     if endpoint.id != id
         || url.scheme() != "http"
@@ -171,17 +228,33 @@ fn prepare_model(id: &str, session: &mut Option<LocalEndpoint>) -> Result<LocalE
     {
         return Err("本地模型服务返回了意外的地址或模型名称。".into());
     }
+    if let Some(load) = load {
+        if let Err(cancelled) = load.complete() {
+            if endpoint.started {
+                release_session(session)
+                    .map_err(|error| format!("释放本次启动的模型失败：{error}"))?;
+            } else {
+                // A model already in use before this request belongs to the previous session.
+                *session = Some(endpoint);
+            }
+            return Err(cancelled);
+        }
+    }
     *session = Some(endpoint.clone());
     Ok(endpoint)
 }
 
 pub fn release() -> Result<(), String> {
+    let mut session = SESSION.lock().map_err(|_| "无法读取本地模型状态。")?;
+    release_session(&mut session)
+}
+
+fn release_session(session: &mut Option<LocalEndpoint>) -> Result<(), String> {
     #[derive(Deserialize)]
     struct Released {
         released: bool,
     }
-    let mut session = SESSION.lock().map_err(|_| "无法读取本地模型状态。")?;
-    let status: Released = run_helper("Release", None)?;
+    let status: Released = run_helper("Release", None, None)?;
     if !status.released {
         return Err("上一模型仍在使用 GPU。".into());
     }
@@ -219,16 +292,30 @@ fn save_to(path: &Path, endpoint: &LocalEndpoint) -> Result<(), String> {
 }
 
 pub fn ready_engine(config: &Config) -> Result<OpenAIEngine, String> {
+    ready(config, None)
+}
+
+pub fn ready_engine_cancellable(config: &Config, load: &ModelLoad) -> Result<OpenAIEngine, String> {
+    ready(config, Some(load))
+}
+
+fn ready(config: &Config, load: Option<&ModelLoad>) -> Result<OpenAIEngine, String> {
     let id = selected_id(config).ok_or("尚未选择本地语音模型。")?;
     let mut session = SESSION.lock().map_err(|_| "无法读取本地模型状态。")?;
+    if let Some(load) = load {
+        load.check()?;
+    }
     if let Some(cached) = session.as_ref().filter(|service| service.id == id) {
         let engine = OpenAIEngine::from_local_service(&cached.service());
         // The previous manager may have died and its port may now belong to a different GUI.
         if engine.check_model_for(Some(std::process::id())).is_ok() {
+            if let Some(load) = load {
+                load.complete()?;
+            }
             return Ok(engine);
         }
     }
-    let active = prepare_model(id, &mut session)?;
+    let active = prepare_model(id, &mut session, load)?;
     Ok(OpenAIEngine::from_local_service(&active.service()))
 }
 
@@ -245,7 +332,7 @@ pub fn benchmark_engine(id: &str) -> Result<OpenAIEngine, String> {
             }
             Some(active) => active.clone(),
             // A fresh GUI remembers its selection but has no GPU worker yet.
-            None => prepare_model(id, &mut session)?,
+            None => prepare_model(id, &mut session, None)?,
         }
     };
     // These short samples use the engine's usual 60-second request timeout.
@@ -273,6 +360,7 @@ mod tests {
                 id: id.into(),
                 base_url: "http://127.0.0.1:18118/v1".into(),
                 use_vocabulary_prompt: false,
+                started: false,
             };
             save_to(&path, &endpoint).unwrap();
             let source = fs::read_to_string(&path).unwrap();

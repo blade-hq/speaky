@@ -1,5 +1,6 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -143,11 +144,46 @@ pub struct LlmConfig {
     pub custom_prompt: String,
     #[serde(default)]
     pub openai: LlmOpenAIConfig,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub autodl_api_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub autodl_model: String,
 }
 
 impl LlmConfig {
-    pub fn learns_preferences(&self) -> bool {
-        self.enabled && self.learn_preferences && self.custom_prompt.trim().is_empty()
+    pub fn autodl_key(&self) -> Option<&str> {
+        let shared = self.autodl_api_key.trim();
+        if !shared.is_empty() {
+            return Some(shared);
+        }
+        // Configurations made before the shared key stored it in the organizer preset.
+        let legacy = self.openai.api_key.trim();
+        (crate::autodl::is_base_url(&self.openai.base_url) && !legacy.is_empty()).then_some(legacy)
+    }
+
+    pub fn organizer_service(&self) -> Cow<'_, LlmOpenAIConfig> {
+        let service = &self.openai;
+        let selected = self.autodl_model.trim();
+        if selected.is_empty() && !crate::autodl::is_base_url(&service.base_url) {
+            return Cow::Borrowed(service);
+        }
+        let key = self.autodl_key().unwrap_or_default();
+        if selected.is_empty()
+            && service.base_url == crate::autodl::BASE_URL
+            && key == service.api_key
+        {
+            return Cow::Borrowed(service);
+        }
+        Cow::Owned(LlmOpenAIConfig {
+            base_url: crate::autodl::BASE_URL.into(),
+            model: if selected.is_empty() {
+                &service.model
+            } else {
+                selected
+            }
+            .into(),
+            api_key: key.into(),
+        })
     }
 }
 

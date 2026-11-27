@@ -244,18 +244,20 @@ impl Target {
                 if view.mac_delivery_generation != generation {
                     return;
                 }
-                if confirmed {
-                    view.status = "已输入到停止时的输入框。".into();
+                let message = if confirmed {
+                    ""
                 } else if clipboard_unchanged {
                     // The transcript is already on the pasteboard. Rewriting it here
                     // could race a copy the user makes after verification completes.
-                    view.status = crate::clipboard_notice::MESSAGE.into();
                     if let Err(error) = crate::clipboard_notice::show(cx) {
                         log::warn!("clipboard notice: {error}");
                     }
+                    crate::CLIPBOARD_FALLBACK_MESSAGE
                 } else {
-                    view.status =
-                        "剪贴板已更新，已保留新内容。转写结果保存在历史中，请从历史复制。".into();
+                    "转写已保存，请从历史复制。"
+                };
+                if let Some((crate::history::Target::Draft(path), _)) = &view.result {
+                    view.set_transcript_feedback(path.clone(), message.into());
                 }
                 cx.notify();
             });

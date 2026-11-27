@@ -41,6 +41,16 @@ fn decode_transcript(body: &str, is_json: bool) -> EngineResult {
     Ok(text.trim().to_owned())
 }
 
+/// Whisper can describe noise as bracketed annotations with no spoken words.
+fn whisper_annotations_only(text: &str) -> bool {
+    !text.is_empty()
+        && text.split_inclusive(']').all(|segment| {
+            ["[BLANK_AUDIO]", "[Silence]", "[Music]", "[Applause]", "[Noise]"]
+                .iter()
+                .any(|annotation| segment.trim().eq_ignore_ascii_case(annotation))
+        })
+}
+
 /// Recognition is called from a worker thread, so provide a runtime for the
 /// async HTTP implementation instead of assuming a Tokio context exists.
 pub(crate) static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
@@ -340,6 +350,9 @@ impl OpenAIEngine {
             },
             None => decode_transcript(&text, is_json)?,
         };
+        if wire_model.to_ascii_lowercase().contains("whisper") && whisper_annotations_only(&result) {
+            return Ok(String::new());
+        }
         debug!("Transcription complete: {} chars", result.len());
         Ok(result)
     }
@@ -537,6 +550,14 @@ mod tests {
         );
         assert_eq!(decode_transcript(r#""中文""#, false).unwrap(), r#""中文""#);
         assert!(decode_transcript(r#"{"error":"invalid"}"#, true).is_err());
+    }
+
+    #[test]
+    fn distinguishes_whisper_annotations_from_recognized_words() {
+        assert!(super::whisper_annotations_only("[BLANK_AUDIO][Music]"));
+        assert!(super::whisper_annotations_only("[Music]\n[noise]"));
+        assert!(!super::whisper_annotations_only("[Music] 你好"));
+        assert!(!super::whisper_annotations_only("我喜欢音乐"));
     }
 
     #[test]

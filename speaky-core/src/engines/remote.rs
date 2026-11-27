@@ -1,10 +1,11 @@
 //! Clients for user-configured transcription endpoints. Detection and ordinary
 //! dictation exercise the same request, with a shorter deadline for detection.
 mod funasr;
+pub(super) mod gemini;
 #[cfg(test)]
 mod tests;
 
-use super::{openai::RUNTIME, Engine, EngineError, EngineResult};
+use super::{openai::RUNTIME, Engine, EngineError, EngineResult, TranscriptionPass};
 use reqwest::{header::HeaderValue, multipart, Client, Url};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -15,6 +16,7 @@ pub enum Protocol {
     #[default]
     #[serde(rename = "openai")]
     OpenAI,
+    Gemini,
     WhisperCpp,
     #[serde(rename = "funasr")]
     FunAsr,
@@ -24,6 +26,7 @@ impl Protocol {
     pub fn label(&self) -> &'static str {
         match self {
             Self::OpenAI => "OpenAI 兼容转写",
+            Self::Gemini => "Gemini 音频转写",
             Self::WhisperCpp => "whisper.cpp 原生 HTTP",
             Self::FunAsr => "FunASR WebSocket",
         }
@@ -61,11 +64,26 @@ impl RemoteEngine {
         if protocol == Protocol::OpenAI && model.trim().is_empty() {
             return Err("OpenAI 兼容转写需要模型 ID。".into());
         }
-        let authorization = if api_key.trim().is_empty() {
+        let model = model.trim();
+        let api_key = api_key.trim();
+        let gemini = protocol == Protocol::Gemini;
+        if gemini {
+            if gemini::endpoint(model)? != endpoint {
+                return Err("请使用对应模型的 AutoDL 官方 HTTPS Gemini 转写地址。".into());
+            }
+            if api_key.is_empty() {
+                return Err("请填写 AutoDL 的大模型 API 密钥。".into());
+            }
+        }
+        let authorization = if api_key.is_empty() {
             None
         } else {
-            let mut value = HeaderValue::from_str(&format!("Bearer {}", api_key.trim()))
-                .map_err(|_| "API 密钥包含无效字符。")?;
+            let mut value = if gemini {
+                HeaderValue::from_str(api_key)
+            } else {
+                HeaderValue::from_str(&format!("Bearer {api_key}"))
+            }
+            .map_err(|_| "API 密钥包含无效字符。")?;
             value.set_sensitive(true);
             Some(value)
         };
@@ -77,7 +95,7 @@ impl RemoteEngine {
         Ok(Self {
             protocol,
             endpoint,
-            model: model.trim().to_owned(),
+            model: model.to_owned(),
             authorization,
             client,
         })
@@ -91,6 +109,21 @@ impl RemoteEngine {
         RUNTIME.block_on(async {
             tokio::time::timeout(timeout, async {
                 match self.protocol {
+                    Protocol::Gemini => {
+                        let key = self
+                            .authorization
+                            .as_ref()
+                            .ok_or(EngineError::NotConfigured)?;
+                        gemini::transcribe(
+                            &self.client,
+                            self.endpoint.clone(),
+                            &self.model,
+                            key,
+                            audio,
+                            language,
+                        )
+                        .await
+                    }
                     Protocol::FunAsr => {
                         funasr::transcribe(
                             &self.endpoint,
@@ -129,31 +162,7 @@ impl RemoteEngine {
         if let Some(header) = &self.authorization {
             request = request.header(reqwest::header::AUTHORIZATION, header.clone());
         }
-        let mut response = request.send().await.map_err(|err| {
-            EngineError::NetworkError(
-                if err.is_timeout() {
-                    "连接超时。"
-                } else {
-                    "无法连接转写服务，请检查地址、网络和 TLS 配置。"
-                }
-                .into(),
-            )
-        })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(status_error(status.as_u16()));
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| EngineError::NetworkError("读取转写响应失败。".into()))?
-        {
-            if body.len() + chunk.len() > 16 * 1024 * 1024 {
-                return Err(EngineError::InvalidResponse("转写响应过大。".into()));
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = send_request(request).await?;
         #[derive(Deserialize)]
         struct Transcript {
             text: String,
@@ -162,6 +171,35 @@ impl RemoteEngine {
             .map_err(|_| EngineError::InvalidResponse("服务未返回包含 text 的转写结果。".into()))?;
         Ok(result.text.trim().to_owned())
     }
+}
+
+async fn send_request(request: reqwest::RequestBuilder) -> Result<Vec<u8>, EngineError> {
+    let mut response = request.send().await.map_err(|err| {
+        EngineError::NetworkError(
+            if err.is_timeout() {
+                "连接超时。"
+            } else {
+                "无法连接转写服务，请检查地址、网络和 TLS 配置。"
+            }
+            .into(),
+        )
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(status_error(status.as_u16()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| EngineError::NetworkError("读取转写响应失败。".into()))?
+    {
+        if body.len() + chunk.len() > 16 * 1024 * 1024 {
+            return Err(EngineError::InvalidResponse("转写响应过大。".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn status_error(status: u16) -> EngineError {
@@ -177,7 +215,7 @@ fn status_error(status: u16) -> EngineError {
 
 impl Engine for RemoteEngine {
     fn name(&self) -> &str {
-        if self.protocol == Protocol::OpenAI {
+        if matches!(self.protocol, Protocol::OpenAI | Protocol::Gemini) {
             &self.model
         } else {
             self.protocol.label()
@@ -190,5 +228,18 @@ impl Engine for RemoteEngine {
 
     fn transcribe(&self, audio: &[u8], language: &str) -> EngineResult {
         self.run(audio, language, Duration::from_secs(3600))
+    }
+
+    fn transcribe_with_vocabulary(
+        &self,
+        audio: &[u8],
+        language: &str,
+        _vocabulary: &[&str],
+        pass: TranscriptionPass,
+    ) -> EngineResult {
+        if self.protocol == Protocol::Gemini && pass == TranscriptionPass::Preview {
+            return Ok(String::new());
+        }
+        self.transcribe(audio, language)
     }
 }

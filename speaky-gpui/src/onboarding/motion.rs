@@ -5,15 +5,18 @@ use std::time::Instant;
 pub(super) enum Scene {
     #[default]
     Welcome,
+    Shortcut,
+    ShortcutReady,
     Microphone,
     Model,
+    ModelReady,
+    Floating,
+    FloatingReady,
     Record,
     Live,
     Transcript,
-    HistoryLink,
-    Archive,
+    Processing,
     Finish,
-    Exit,
 }
 
 struct Cue {
@@ -26,16 +29,16 @@ struct Cue {
 impl Scene {
     fn cue(self) -> Cue {
         let (focus, card, content, end) = match self {
-            Self::Welcome => ((390., 1040.), (35., 345.), (210., 650.), 1080.),
-            Self::Microphone => ((0., 430.), (120., 560.), (280., 630.), 1120.),
-            Self::Model => ((0., 470.), (155., 640.), (315., 700.), 730.),
-            Self::Record => ((0., 380.), (125., 525.), (260., 590.), 1450.),
-            Self::Live => ((0., 310.), (60., 335.), (110., 365.), 365.),
-            Self::Transcript => ((70., 635.), (215., 720.), (440., 825.), 1570.),
-            Self::HistoryLink => ((0., 495.), (95., 535.), (235., 565.), 565.),
-            Self::Archive => ((0., 385.), (90., 480.), (235., 520.), 520.),
-            Self::Finish => ((0., 550.), (160., 610.), (325., 675.), 675.),
-            Self::Exit => ((0., 230.), (0., 145.), (0., 145.), 230.),
+            Self::Welcome => ((25., 410.), (0., 280.), (95., 405.), 550.),
+            Self::Shortcut | Self::Microphone | Self::Model | Self::Floating | Self::Finish => {
+                ((0., 330.), (0., 330.), (35., 340.), 465.)
+            }
+            Self::ShortcutReady | Self::ModelReady | Self::FloatingReady => {
+                ((0., 220.), (0., 260.), (0., 320.), 560.)
+            }
+            Self::Record => ((0., 340.), (0., 325.), (40., 350.), 635.),
+            Self::Live | Self::Processing => ((0., 310.), (0., 310.), (35., 325.), 430.),
+            Self::Transcript => ((0., 370.), (0., 360.), (80., 430.), 600.),
         };
         Cue {
             focus,
@@ -122,10 +125,6 @@ impl Clock {
         now.saturating_duration_since(self.start).as_secs_f32() * 1000.
     }
 
-    pub fn scene(&self) -> Scene {
-        self.scene
-    }
-
     pub fn frame(
         &mut self,
         scene: Scene,
@@ -158,7 +157,7 @@ impl Clock {
             lerp(
                 self.from_progress,
                 self.target_progress,
-                smooth(phase(elapsed, 75., 460.)),
+                smooth(phase(elapsed, 25., 315.)),
             )
         } else {
             self.target_progress

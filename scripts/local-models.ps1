@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][ValidateSet('List','Ensure','Release')][string]$Action,
     [string]$ModelId,
-    [int]$OwnerPid
+    [int]$OwnerPid,
+    [string]$CancelId
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -33,6 +34,7 @@ if (!$python -or $python -match '\\Microsoft\\WindowsApps\\python.exe$') {
 }
 $arguments = @('-B', '-X', 'utf8', (Join-Path $PSScriptRoot 'local_models.py'), $Action)
 if ($Action -eq 'Ensure') { $arguments += @('--model', $ModelId, '--owner', $OwnerPid) }
+if ($Action -eq 'Ensure' -and $CancelId) { $arguments += @('--cancel-id', $CancelId) }
 if ($Action -eq 'Release') { $arguments += @('--owner', $OwnerPid) }
 & $python @arguments
 exit $LASTEXITCODE

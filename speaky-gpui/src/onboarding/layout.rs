@@ -5,8 +5,8 @@ use std::{
 };
 
 use gpui::{
-    canvas, div, point, prelude::*, px, size, AnyElement, AvailableSpace, Bounds, Canvas, Div,
-    Pixels, Point, ScrollHandle, Size,
+    canvas, div, point, prelude::*, px, size, AnyElement, AvailableSpace, Bounds, Canvas, Pixels,
+    Point, ScrollHandle, Size,
 };
 
 use super::{
@@ -26,11 +26,16 @@ pub(crate) enum Anchor {
     Shortcut,
     Language,
     Model,
+    ModelChoice,
+    Rewrite,
+    Floating,
     Service,
     Record,
     RecordButton,
     Transcript,
     HistoryLink,
+    TermsLink,
+    FilesLink,
     History,
     SettingsError,
     Status,
@@ -103,7 +108,7 @@ impl Layout {
         cue: Frame,
         primary: Anchor,
         companion: Option<Anchor>,
-        history_link: bool,
+        extra: Option<Anchor>,
         status: bool,
         card: Option<AnyElement>,
     ) -> impl IntoElement {
@@ -128,10 +133,14 @@ impl Layout {
                 let visible = |anchor: Anchor| {
                     frame[anchor as usize].and_then(|target| visible_target(target, viewport))
                 };
-                let focus = target.and_then(|target| visible_target(target, viewport));
+                let focus = if cue.scene == Scene::Welcome {
+                    Some(effects::centered(viewport.center(), px(51.), px(51.)))
+                } else {
+                    target.and_then(|target| visible_target(target, viewport))
+                };
                 let extras: Vec<_> = companion
                     .into_iter()
-                    .chain(history_link.then_some(Anchor::HistoryLink))
+                    .chain(extra)
                     .chain(status.then_some(Anchor::Status))
                     .filter_map(visible)
                     .collect();
@@ -139,22 +148,21 @@ impl Layout {
                 let dock =
                     frame[Anchor::Dock as usize].map(|dock| dock.bounds.intersect(&viewport));
 
-                // The cutouts leave the actual controls hit-testable. Scroll events can
-                // still reach the page beneath the shaded areas.
-                let mut blockers = div().size_full();
-                if cue.scene != Scene::Exit {
-                    for bounds in subtract_holes(viewport, protected.iter().copied().chain(dock)) {
-                        blockers = blockers
-                            .child(positioned(bounds, viewport.origin).block_mouse_except_scroll());
-                    }
-                }
-                let mut blockers = blockers.into_any_element();
-                blockers.prepaint_as_root(
-                    viewport.origin,
-                    viewport.size.map(AvailableSpace::Definite),
-                    window,
-                    cx,
-                );
+                // The practice spotlight only paints; buttons, menus and scrolling
+                // remain reachable as its outline moves between them.
+                let blocker = (cue.scene == Scene::Welcome).then(|| {
+                    let mut blocker = div()
+                        .size_full()
+                        .block_mouse_except_scroll()
+                        .into_any_element();
+                    blocker.prepaint_as_root(
+                        viewport.origin,
+                        viewport.size.map(AvailableSpace::Definite),
+                        window,
+                        cx,
+                    );
+                    blocker
+                });
 
                 let slot = card.and_then(|mut card| {
                     let dimensions = card.layout_as_root(
@@ -176,13 +184,7 @@ impl Layout {
                         )
                     } else {
                         focus.and_then(|target| {
-                            place_card(
-                                viewport,
-                                target,
-                                &protected,
-                                dimensions,
-                                cue.scene == Scene::HistoryLink,
-                            )
+                            place_card(viewport, target, &protected, dimensions, false)
                         })
                     };
                     if let Some(origin) = origin {
@@ -210,7 +212,7 @@ impl Layout {
                     let origin = slide_card(
                         goal,
                         pose.card_from,
-                        cue.card(),
+                        pose.card_time,
                         viewport,
                         &protected,
                         cue.scene == Scene::Welcome,
@@ -234,10 +236,12 @@ impl Layout {
                 }
                 let record = visible(Anchor::RecordButton);
                 let text = visible(Anchor::Transcript);
-                (blockers, card, pose, holes, extras, record, text)
+                (blocker, card, pose, holes, extras, record, text)
             },
-            move |viewport, (mut blockers, card, pose, holes, extras, record, text), window, cx| {
-                blockers.paint(window, cx);
+            move |viewport, (blocker, card, pose, holes, extras, record, text), window, cx| {
+                if let Some(mut blocker) = blocker {
+                    blocker.paint(window, cx);
+                }
                 effects::backdrop(window, viewport, pose.focus, &holes, pose.shade);
                 if let Some(focus) = pose.focus {
                     effects::lighting(window, cue, focus, &extras, record, pose.ring);
@@ -251,9 +255,10 @@ impl Layout {
             },
         )
         .absolute()
-        .top(px(0.))
+        .top(px(if cfg!(windows) { 32. } else { 28. }))
         .left(px(0.))
-        .size_full()
+        .bottom(px(0.))
+        .w_full()
     }
 }
 
@@ -262,6 +267,7 @@ struct Pose {
     focus: Option<Bounds<Pixels>>,
     card: Option<Point<Pixels>>,
     card_from: Option<Point<Pixels>>,
+    card_time: f32,
     shade: f32,
     ring: f32,
     catching_up: bool,
@@ -287,6 +293,7 @@ impl Camera {
             focus: Some(effects::centered(viewport.center(), px(39.), px(39.))),
             card: card.map(|p| p + point(px(0.), px(18.))),
             card_from: None,
+            card_time: 1.,
             shade: 0.83,
             ring: 0.16,
             catching_up: false,
@@ -328,16 +335,27 @@ impl Camera {
                 blend_rect(previous, target, 1. - (-seconds / 0.038).exp()).intersect(&viewport)
             })
             .filter(|bounds| bounds.size.width > px(0.) && bounds.size.height > px(0.));
-        let (shade, ring) = match cue.scene {
-            Scene::Welcome => (0.66, 0.79),
-            Scene::Finish => (0.14, 0.0),
-            Scene::Exit => (0., 0.),
-            _ => (0.59, 1.),
+        let (shade, ring) = if cue.scene == Scene::Welcome {
+            (0.66, 0.79)
+        } else {
+            (0.19, 1.)
         };
+        let mut card_from = from.card;
+        let mut card_time = cue.card();
+        if cue.moving && card_time >= 1. {
+            if let (Some(previous), Some(goal)) = (shown.card, card) {
+                if (previous.x - goal.x).abs() + (previous.y - goal.y).abs() > px(2.) {
+                    catching_up = true;
+                    card_from = Some(previous);
+                    card_time = 1. - (-seconds / 0.063).exp();
+                }
+            }
+        }
         Pose {
             focus,
             card,
-            card_from: from.card,
+            card_from,
+            card_time,
             shade: motion::lerp(from.shade, shade, time),
             ring: motion::lerp(from.ring, ring, time),
             catching_up,
@@ -479,46 +497,6 @@ fn place_card(
     })
 }
 
-fn subtract_holes(
-    viewport: Bounds<Pixels>,
-    holes: impl IntoIterator<Item = Bounds<Pixels>>,
-) -> Vec<Bounds<Pixels>> {
-    let mut shaded = vec![viewport];
-    for hole in holes {
-        shaded = shaded
-            .into_iter()
-            .flat_map(|region| {
-                let cut = region.intersect(&hole);
-                if cut.size.width <= px(0.) || cut.size.height <= px(0.) {
-                    return [Some(region), None, None, None];
-                }
-                [
-                    rect(region.left(), region.top(), region.right(), cut.top()),
-                    rect(region.left(), cut.bottom(), region.right(), region.bottom()),
-                    rect(region.left(), cut.top(), cut.left(), cut.bottom()),
-                    rect(cut.right(), cut.top(), region.right(), cut.bottom()),
-                ]
-            })
-            .flatten()
-            .collect();
-    }
-    shaded
-}
-
-fn rect(left: Pixels, top: Pixels, right: Pixels, bottom: Pixels) -> Option<Bounds<Pixels>> {
-    (right > left && bottom > top)
-        .then(|| Bounds::from_corners(point(left, top), point(right, bottom)))
-}
-
-fn positioned(bounds: Bounds<Pixels>, origin: Point<Pixels>) -> Div {
-    div()
-        .absolute()
-        .left(bounds.left() - origin.x)
-        .top(bounds.top() - origin.y)
-        .w(bounds.size.width)
-        .h(bounds.size.height)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,22 +515,5 @@ mod tests {
             Some(point(px(349.), px(460.)))
         );
         assert!(place_card(window, bounds(81., 85., 838., 480.), &[window], card, false).is_none());
-    }
-
-    #[test]
-    fn overlapping_cutouts_keep_both_targets_clear() {
-        let viewport = bounds(0., 0., 100., 100.);
-        let holes = vec![bounds(10., 10., 40., 30.), bounds(30., 25., 60., 50.)];
-        let shaded = subtract_holes(viewport, holes.clone());
-        for x in 0..100 {
-            for y in 0..100 {
-                let p = point(px(x as f32 + 0.5), px(y as f32 + 0.5));
-                let expected = usize::from(!holes.iter().any(|hole| hole.contains(&p)));
-                assert_eq!(
-                    shaded.iter().filter(|tile| tile.contains(&p)).count(),
-                    expected
-                );
-            }
-        }
     }
 }

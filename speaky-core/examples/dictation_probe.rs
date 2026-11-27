@@ -32,6 +32,10 @@ fn main() {
                 .as_ref()
                 .ok_or_else(|| "No stopped target".into())
                 .and_then(|target| target.deliver(text)),
+            "revise" => stopped
+                .as_ref()
+                .ok_or_else(|| "No stopped target".into())
+                .and_then(|target| target.revise(text)),
             "fallback" => dictation_target::copy_fallback(text),
             "status" => live
                 .as_ref()

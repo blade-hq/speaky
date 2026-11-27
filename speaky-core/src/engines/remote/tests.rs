@@ -15,6 +15,14 @@ fn http_fixture(
     status: u16,
     body: &'static str,
 ) -> (String, thread::JoinHandle<(String, Vec<u8>)>) {
+    http_fixture_with_headers(status, body, String::new())
+}
+
+fn http_fixture_with_headers(
+    status: u16,
+    body: &'static str,
+    reply_headers: String,
+) -> (String, thread::JoinHandle<(String, Vec<u8>)>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}/custom/path", listener.local_addr().unwrap());
@@ -52,13 +60,116 @@ fn http_fixture(
         reader.read_exact(&mut payload).unwrap();
         write!(
             stream,
-            "HTTP/1.1 {status} Test\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            "HTTP/1.1 {status} Test\r\n{reply_headers}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
         .unwrap();
         (headers, payload)
     });
     (url, exchange)
+}
+
+fn autodl_engine(model: &str) -> RemoteEngine {
+    RemoteEngine::new(
+        Protocol::Gemini,
+        gemini::endpoint(model).unwrap().as_str(),
+        model,
+        "test-key",
+    )
+    .unwrap()
+}
+
+#[test]
+fn gemini_posts_inline_wav_and_decodes_only_completed_non_thought_text() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    for model in [gemini::AUTODL_ASR_MODEL, "gemini-3.1-pro-preview"] {
+        let (endpoint, exchange) = http_fixture(
+            200,
+            r#"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"私密思考"},{"text":" 你好，"},{"text":"语音识别测试。 "}]}}]}"#,
+        );
+        let mut engine = autodl_engine(model);
+        engine.endpoint = Url::parse(&endpoint).unwrap();
+        assert_eq!(
+            engine.probe(SAMPLE, Duration::from_secs(5)).unwrap(),
+            "你好，语音识别测试。"
+        );
+        let (headers, payload) = exchange.join().unwrap();
+        assert!(headers.starts_with("post /custom/path "));
+        assert!(headers.contains("x-goog-api-key: test-key\r\n"));
+        assert!(headers.contains("content-type: application/json\r\n"));
+        assert!(!headers.contains("authorization:"));
+
+        let body: Value = serde_json::from_slice(&payload).unwrap();
+        let parts = &body["contents"][0]["parts"];
+        assert!(parts[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Expected speech language: zh"));
+        assert_eq!(parts[1]["inline_data"]["mime_type"], "audio/wav");
+        assert_eq!(
+            STANDARD
+                .decode(parts[1]["inline_data"]["data"].as_str().unwrap())
+                .unwrap(),
+            SAMPLE
+        );
+        if model == gemini::AUTODL_ASR_MODEL {
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                "MINIMAL"
+            );
+        } else {
+            assert!(body.get("generationConfig").is_none());
+        }
+    }
+}
+
+#[test]
+fn gemini_preview_never_uploads_audio_and_redirect_cannot_forward_the_key() {
+    let third_party = TcpListener::bind("127.0.0.1:0").unwrap();
+    third_party.set_nonblocking(true).unwrap();
+    let redirect = format!(
+        "Location: http://{}/capture\r\n",
+        third_party.local_addr().unwrap()
+    );
+    let (endpoint, exchange) = http_fixture_with_headers(307, "", redirect);
+    let mut engine = autodl_engine(gemini::AUTODL_ASR_MODEL);
+    engine.endpoint = Url::parse(&endpoint).unwrap();
+    assert_eq!(
+        engine
+            .transcribe_with_vocabulary(SAMPLE, "zh", &[], TranscriptionPass::Preview)
+            .unwrap(),
+        ""
+    );
+    assert!(
+        matches!(engine.probe(SAMPLE, Duration::from_secs(5)), Err(EngineError::NetworkError(message)) if message.contains("HTTP 307"))
+    );
+    assert!(exchange
+        .join()
+        .unwrap()
+        .0
+        .contains("x-goog-api-key: test-key"));
+    assert_eq!(
+        third_party.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn gemini_requires_credentials_and_exact_official_endpoint() {
+    let model = gemini::AUTODL_ASR_MODEL;
+    let endpoint = gemini::endpoint(model).unwrap().to_string();
+    for wrong_endpoint in [
+        endpoint.replace("https://", "http://"),
+        endpoint.replace("www.autodl.art", "www.autodl.art.evil.example"),
+        endpoint.replace("www.autodl.art", "www.autodl.art:8443"),
+        endpoint.replace("www.autodl.art", "user@www.autodl.art"),
+        endpoint.replace(model, "gemini-other"),
+        format!("{endpoint}?key=query"),
+    ] {
+        assert!(RemoteEngine::new(Protocol::Gemini, &wrong_endpoint, model, "test-key").is_err());
+    }
+    assert!(RemoteEngine::new(Protocol::Gemini, &endpoint, model, "").is_err());
 }
 
 #[test]

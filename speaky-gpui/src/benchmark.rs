@@ -123,12 +123,16 @@ pub(super) enum BenchmarkModel {
 
 impl BenchmarkModel {
     pub(super) fn selected(config: &crate::config::Config) -> Option<Self> {
-        if config.engine.current == "remote" {
-            let service = &config.engine.remote;
+        let service = match config.engine.current.as_str() {
+            "remote" => Some(config.engine.remote.clone()),
+            "autodl" => crate::engines::autodl_asr_service(config).ok(),
+            _ => None,
+        };
+        if let Some(service) = service {
             return Some(Self::Remote {
                 protocol: service.protocol.label(),
                 model: service.label(),
-                endpoint: service.endpoint.clone(),
+                endpoint: service.endpoint,
             });
         }
         if let Some(f) = crate::config::Framework::selected(config) {

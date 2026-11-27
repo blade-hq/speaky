@@ -179,6 +179,10 @@ pub fn organize_with_prompt(
     if model.is_empty() {
         return Err("请填写整理模型 ID。".into());
     }
+    let api_key = settings.api_key.trim();
+    if api_key.is_empty() && crate::autodl::is_base_url(&settings.base_url) {
+        return Err("请先配置 AutoDL API Key。".into());
+    }
     let endpoint = chat_endpoint(&settings.base_url)?;
     let body = encode_request(model, prompt, transcript)?;
     let runtime = RUNTIME.as_ref().map_err(|_| "无法初始化整理服务。")?;
@@ -189,7 +193,6 @@ pub fn organize_with_prompt(
             .post(endpoint)
             .header(CONTENT_TYPE, "application/json")
             .body(body);
-        let api_key = settings.api_key.trim();
         if !api_key.is_empty() {
             request = request.bearer_auth(api_key);
         }
@@ -262,6 +265,10 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://provider.example/custom/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_endpoint(crate::autodl::BASE_URL).unwrap().as_str(),
+            "https://www.autodl.art/api/v1/chat/completions"
         );
         for url in [
             "file:///tmp/chat",
