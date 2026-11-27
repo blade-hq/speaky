@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod autodl;
+pub mod benchmark_sets;
 pub mod config;
 #[cfg(windows)]
 pub mod dictation_target;

@@ -1,14 +1,15 @@
 use crate::{
     app::{self, Event, Updates},
     d2d::{self, Graphics},
-    floating,
+    files, floating,
+    hotkey_capture::{self, Event as ShortcutEvent, Keys as ShortcutKeys},
     overlay::{Layer, Overlay},
     tray,
 };
 use speaky_core::{
     audio::{AudioRecorder, VoiceActivity},
     config::{Config, RemoteService},
-    engines, history,
+    drafts, engines, history,
     hotkey::{GlobalHotkey, HotkeyEvents, Shortcut},
     playback::Playback,
     session::{LANGUAGES, SAMPLE_AUDIO},
@@ -31,13 +32,18 @@ use windows_sys::Win32::{
     System::{LibraryLoader::GetModuleHandleW, Threading::CreateMutexW},
     UI::{
         Controls::{
-            InitCommonControlsEx, EM_GETSEL, EM_SETREADONLY, EM_SETSEL, ICC_STANDARD_CLASSES,
-            INITCOMMONCONTROLSEX,
+            InitCommonControlsEx, DRAWITEMSTRUCT, EM_GETSEL, EM_SETREADONLY, EM_SETSEL,
+            ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, ODS_FOCUS,
+            ODS_SELECTED, PBM_SETPOS,
         },
         Input::KeyboardAndMouse::EnableWindow,
         WindowsAndMessaging::*,
     },
 };
+
+mod benchmark;
+mod diagnostics;
+mod theme;
 
 const CLASS: windows_sys::core::PCWSTR = windows_sys::w!("SpeakyWin7App");
 const WAKE: u32 = WM_APP + 3;
@@ -69,6 +75,30 @@ const DICTIONARY: usize = 31;
 const SAVE_TERMS: usize = 32;
 const LEARNED: usize = 33;
 const FETCH_MODELS: usize = 34;
+const CANCEL_HOTKEY: usize = 35;
+const HOTKEY_HINT: usize = 36;
+const NAV_HOME: usize = 100;
+const NAV_FILES: usize = 101;
+const NAV_HISTORY: usize = 102;
+const NAV_GUIDE: usize = 103;
+const NAV_DIAGNOSTICS: usize = 104;
+const NAV_ORGANIZER: usize = 105;
+const THEME: usize = 106;
+const IMPORT: usize = 107;
+const EXPORT: usize = 108;
+const HISTORY_SEARCH: usize = 109;
+const ORGANIZED: usize = 110;
+const LIVE_TEXT: usize = 111;
+const INPUT_LEVEL: usize = 112;
+const HOME_RECENT: usize = 113;
+const HOME_MODELS: usize = 114;
+const GUIDE_NEXT: usize = 115;
+const GUIDE_PREV: usize = 116;
+const FORGET_TERM: usize = 117;
+const TERM_TO_FORGET: usize = 118;
+const NAV_MODELS: usize = 119;
+const NAV_BENCHMARK: usize = 120;
+const RAIL_WIDTH: i32 = 152;
 const LOADING_MODELS: &str = "正在获取模型列表…";
 
 thread_local! {
@@ -77,21 +107,34 @@ thread_local! {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
+    Home,
+    Files,
     History,
     Settings,
     Terms,
+    Guide,
+    Organizer,
+    Diagnostics,
+    Benchmark,
+}
+
+struct ShortcutCapture {
+    keys: ShortcutKeys,
+    previous: Shortcut,
 }
 
 struct Window {
     hwnd: HWND,
     scale: f32,
     font: HFONT,
+    title_font: HFONT,
     config: Config,
     tray: tray::Tray,
     graphics: Option<Graphics>,
     overlay: Option<Overlay>,
     floating: Option<Layer>,
     hotkey: Option<(GlobalHotkey, HotkeyEvents)>,
+    shortcut_capture: Option<ShortcutCapture>,
     updates: Updates,
     events: Receiver<Event>,
     stop: Option<Sender<app::StopRequest>>,
@@ -113,14 +156,20 @@ struct Window {
     period: u32,
     floating_dirty: bool,
     rows: app::Rows,
+    history_indices: Vec<usize>,
+    history_query: String,
+    organized_visible: bool,
     selected: usize,
     editing: bool,
     play: Option<Playback>,
     panel: Panel,
+    guide_step: usize,
+    benchmark: benchmark::BenchmarkState,
     controls: Vec<HWND>,
     devices: Vec<(u32, String)>,
     model_catalog: Option<engines::ModelCatalog>,
     model_catalog_request: u64,
+    loading_model_catalog: bool,
     status: String,
     auxiliary_busy: bool,
     taskbar_created: u32,
@@ -182,7 +231,7 @@ pub fn run() -> Result<(), String> {
         let _com = Com;
         InitCommonControlsEx(&INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS,
         });
         for (class, callback, background) in [
             (
@@ -209,9 +258,12 @@ pub fn run() -> Result<(), String> {
                 return Err(std::io::Error::last_os_error().to_string());
             }
         }
-        let scale = d2d::system_scale();
+        let mut work = windows_sys::Win32::Foundation::RECT::default();
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut _ as _, 0);
+        let scale = d2d::system_scale()
+            .min(((work.right - work.left - 24) as f32 / (660 + RAIL_WIDTH) as f32).max(0.7));
         let mut bounds = windows_sys::Win32::Foundation::RECT {
-            right: px(scale, 660),
+            right: px(scale, 660 + RAIL_WIDTH),
             bottom: px(scale, 450),
             ..Default::default()
         };
@@ -222,8 +274,8 @@ pub fn run() -> Result<(), String> {
             CLASS,
             windows_sys::w!("Speaky · Windows 7"),
             style,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            work.left + ((work.right - work.left - (bounds.right - bounds.left)) / 2).max(0),
+            work.top + ((work.bottom - work.top - (bounds.bottom - bounds.top)) / 2).max(0),
             bounds.right - bounds.left,
             bounds.bottom - bounds.top,
             null_mut(),
@@ -270,18 +322,37 @@ pub fn run() -> Result<(), String> {
             0,
             CLEARTYPE_QUALITY as u32,
             0,
-            windows_sys::w!("Microsoft YaHei UI"),
+            windows_sys::w!("Microsoft YaHei"),
         );
+        let title_font = CreateFontW(
+            -px(scale, 24),
+            0,
+            0,
+            0,
+            FW_SEMIBOLD as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            0,
+            0,
+            CLEARTYPE_QUALITY as u32,
+            0,
+            windows_sys::w!("Microsoft YaHei"),
+        );
+        theme::set_palette(&config.appearance.theme);
         let mut state = Window {
             hwnd,
             scale,
             font,
+            title_font,
             config,
             tray: tray::Tray::new(hwnd),
             graphics,
             overlay: None,
             floating: None,
             hotkey,
+            shortcut_capture: None,
             updates: updates.clone(),
             events,
             stop: None,
@@ -306,14 +377,20 @@ pub fn run() -> Result<(), String> {
             period: 32,
             floating_dirty: true,
             rows: Vec::new(),
+            history_indices: Vec::new(),
+            history_query: String::new(),
+            organized_visible: false,
             selected: 0,
             editing: false,
             play: None,
-            panel: Panel::History,
+            panel: Panel::Home,
+            guide_step: 0,
+            benchmark: Default::default(),
             controls: Vec::new(),
             devices: Vec::new(),
             model_catalog: None,
             model_catalog_request: 0,
+            loading_model_catalog: false,
             status,
             auxiliary_busy: false,
             taskbar_created: RegisterWindowMessageW(windows_sys::w!("TaskbarCreated")),
@@ -333,6 +410,17 @@ pub fn run() -> Result<(), String> {
             if result == 0 {
                 break;
             }
+            // Consume recording keys before dialog navigation handles Tab, Enter or Esc.
+            // End the STATE borrow before any normal dispatch can synchronously reenter it.
+            let captured = STATE.with(|slot| {
+                slot.try_borrow_mut()
+                    .ok()
+                    .and_then(|mut state| state.as_mut().map(|state| state.capture_shortcut(&msg)))
+                    .unwrap_or(false)
+            });
+            if captured {
+                continue;
+            }
             if IsDialogMessageW(hwnd, &msg) == 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -341,11 +429,29 @@ pub fn run() -> Result<(), String> {
         STATE.with(|slot| drop(slot.borrow_mut().take()));
         DestroyWindow(hwnd);
         DeleteObject(font);
+        DeleteObject(title_font);
         Ok(())
     }
 }
 
 unsafe extern "system" fn main_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if matches!(
+        message,
+        WM_ERASEBKGND | WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN
+    ) {
+        if let Some(result) = theme::paint_control(hwnd, message, w, l) {
+            return result;
+        }
+    }
+    if message == WM_DRAWITEM {
+        if let Some(result) = STATE.with(|slot| {
+            slot.try_borrow()
+                .ok()
+                .and_then(|slot| slot.as_ref().and_then(|state| state.paint(message, w, l)))
+        }) {
+            return result;
+        }
+    }
     let handled = STATE.with(|slot| {
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return false;
@@ -362,6 +468,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     if w >> 16 == CBN_SELCHANGE as usize {
                         state.provider_changed();
                     }
+                } else if id == MODEL {
+                    if w >> 16 == CBN_DROPDOWN as usize && state.model_catalog.is_none() {
+                        state.fetch_models(true);
+                    }
                 } else if matches!(id, ADDRESS | KEY) {
                     if w >> 16 == EN_CHANGE as usize {
                         state.clear_models();
@@ -370,12 +480,21 @@ unsafe extern "system" fn main_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     if w >> 16 == LBN_SELCHANGE as usize {
                         state.select();
                     }
+                } else if id == HISTORY_SEARCH {
+                    if w >> 16 == EN_CHANGE as usize && !state.editing {
+                        state.history_query = state.text(HISTORY_SEARCH);
+                        state.fill_history();
+                    }
                 } else {
                     state.command(id);
                 }
             }
             WM_CLOSE => {
+                state.cancel_shortcut_capture();
                 ShowWindow(hwnd, SW_HIDE);
+            }
+            WM_ACTIVATE if w & 0xffff == WA_INACTIVE as usize => {
+                state.cancel_shortcut_capture();
             }
             WM_QUERYENDSESSION => {
                 if state.stop.is_some()
@@ -461,6 +580,17 @@ impl Window {
         (x, y, w, h): (i32, i32, i32, i32),
         style: u32,
     ) {
+        self.control_at(id, class, text, (x + RAIL_WIDTH, y, w, h), style);
+    }
+
+    fn control_at(
+        &mut self,
+        id: usize,
+        class: &str,
+        text: &str,
+        (x, y, w, h): (i32, i32, i32, i32),
+        style: u32,
+    ) {
         unsafe {
             let hwnd = CreateWindowExW(
                 if matches!(class, "EDIT" | "LISTBOX") {
@@ -486,7 +616,13 @@ impl Window {
     }
 
     fn button(&mut self, id: usize, text: &str, x: i32, y: i32, w: i32) {
-        self.control(id, "BUTTON", text, (x, y, w, 30), WS_TABSTOP);
+        self.control(
+            id,
+            "BUTTON",
+            text,
+            (x, y, w, 30),
+            WS_TABSTOP | BS_OWNERDRAW as u32,
+        );
     }
 
     fn label(&mut self, text: &str, x: i32, y: i32, w: i32) {
@@ -498,8 +634,13 @@ impl Window {
     }
 
     fn set(&self, id: usize, text: &str) {
+        let child = self.child(id);
+        if child.is_null() {
+            return;
+        }
         unsafe {
-            SetWindowTextW(self.child(id), wide(text).as_ptr());
+            SetWindowTextW(child, wide(text).as_ptr());
+            InvalidateRect(child, null(), 0);
         }
     }
 
@@ -543,8 +684,10 @@ impl Window {
     }
 
     fn layout(&mut self) {
+        self.cancel_shortcut_capture();
         self.model_catalog = None;
         self.model_catalog_request += 1;
+        self.loading_model_catalog = false;
         if self.status == LOADING_MODELS {
             self.status = "就绪".into();
         }
@@ -555,28 +698,42 @@ impl Window {
         }
         let status = self.status.clone();
         self.control(STATUS, "STATIC", &status, (14, 12, 630, 42), 0);
-        if self.panel != Panel::History {
-            self.button(BACK, "返回历史", 532, 59, 112);
-        }
+        self.navigation();
         match self.panel {
+            Panel::Home => self.home_layout(),
+            Panel::Files => self.files_layout(),
+            Panel::Guide => self.guide_layout(),
+            Panel::Organizer => self.organizer_layout(),
+            Panel::Diagnostics => self.diagnostics_layout(),
+            Panel::Benchmark => self.benchmark_layout(),
             Panel::History => {
-                self.button(RECORD, self.record_label(), 14, 56, 125);
-                self.button(SETTINGS, "设置服务", 148, 56, 106);
-                self.button(TERMS, "常用词", 264, 56, 106);
-                self.label("录音与历史", 14, 101, 200);
-                self.label("转写正文", 260, 101, 200);
+                self.heading("历史记录");
+                let query = self.history_query.clone();
+                self.label("搜索", 14, 92, 54);
+                self.control(
+                    HISTORY_SEARCH,
+                    "EDIT",
+                    &query,
+                    (66, 89, 228, 25),
+                    WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                );
+                self.button(EXPORT, "导出文字", 305, 87, 94);
+                self.button(ORGANIZED, "原文 / 整理稿", 409, 87, 116);
+                self.button(diagnostics::ORGANIZE_HISTORY, "整理文字", 535, 87, 109);
+                self.label("录音", 14, 120, 200);
+                self.label("正文", 260, 120, 200);
                 self.control(
                     LIST,
                     "LISTBOX",
                     "",
-                    (14, 128, 230, 264),
+                    (14, 145, 230, 248),
                     WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32,
                 );
                 self.control(
                     BODY,
                     "EDIT",
                     "",
-                    (260, 128, 384, 264),
+                    (260, 145, 384, 248),
                     WS_VSCROLL | WS_TABSTOP | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
                 );
                 for (id, label, x, width) in [
@@ -593,6 +750,7 @@ impl Window {
             }
             Panel::Settings => self.settings_layout(),
             Panel::Terms => {
+                self.heading("词典");
                 self.label("每行一条常用词或替换规则", 14, 100, 600);
                 self.control(
                     DICTIONARY,
@@ -608,12 +766,203 @@ impl Window {
                     LEARNED,
                     "EDIT",
                     "",
-                    (14, 318, 630, 72),
+                    (14, 318, 630, 64),
                     WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
                 );
                 self.button(SAVE_TERMS, "保存常用词", 14, 404, 130);
+                self.control(
+                    TERM_TO_FORGET,
+                    "EDIT",
+                    "",
+                    (253, 405, 253, 27),
+                    WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                );
+                self.button(FORGET_TERM, "移除学习词", 518, 404, 126);
             }
         }
+        unsafe {
+            InvalidateRect(self.hwnd, null(), 1);
+        }
+    }
+
+    fn heading(&mut self, text: &str) {
+        self.control(0, "STATIC", text, (14, 51, 420, 33), 0);
+        unsafe {
+            SendMessageW(
+                *self.controls.last().unwrap(),
+                WM_SETFONT,
+                self.title_font as usize,
+                1,
+            );
+        }
+    }
+
+    fn navigation(&mut self) {
+        self.control_at(0, "STATIC", "Speaky", (19, 23, 125, 35), 0);
+        unsafe {
+            SendMessageW(
+                *self.controls.last().unwrap(),
+                WM_SETFONT,
+                self.title_font as usize,
+                1,
+            );
+        }
+        self.control_at(0, "STATIC", "Windows 7", (20, 61, 110, 24), 0);
+        for (id, label, y) in [
+            (NAV_HOME, "首页", 92),
+            (NAV_MODELS, "模型选择", 129),
+            (NAV_FILES, "转录文件", 166),
+            (NAV_HISTORY, "历史记录", 203),
+            (TERMS, "词典", 240),
+            (NAV_BENCHMARK, "模型评测", 277),
+            (NAV_GUIDE, "进入引导", 326),
+            (NAV_DIAGNOSTICS, "设置", 363),
+        ] {
+            self.control_at(
+                id,
+                "BUTTON",
+                label,
+                (12, y, 125, 33),
+                WS_TABSTOP | BS_OWNERDRAW as u32,
+            );
+        }
+        let caption = if self.config.appearance.theme == "light" {
+            "深色主题"
+        } else {
+            "浅色主题"
+        };
+        self.control_at(
+            THEME,
+            "BUTTON",
+            caption,
+            (12, 402, 125, 32),
+            WS_TABSTOP | BS_OWNERDRAW as u32,
+        );
+    }
+
+    fn home_layout(&mut self) {
+        self.heading("首页");
+        self.label("听写与录音", 14, 103, 260);
+        self.button(RECORD, self.record_label(), 14, 136, 155);
+        self.button(HOME_MODELS, "选择识别模型", 182, 136, 149);
+        self.label(
+            &format!("快捷键：{}", self.selected_shortcut().label()),
+            354,
+            141,
+            280,
+        );
+        let model = self.config.engine.remote.label();
+        self.label(&format!("识别模型：{model}"), 14, 184, 620);
+        self.label("输入音量", 14, 222, 89);
+        self.control(INPUT_LEVEL, "msctls_progress32", "", (111, 226, 533, 15), 0);
+        self.label("实时转写", 14, 256, 150);
+        self.control(
+            LIVE_TEXT,
+            "EDIT",
+            "",
+            (14, 283, 630, 87),
+            WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32,
+        );
+        self.button(NAV_HISTORY, "查看历史", 14, 398, 109);
+        self.control(HOME_RECENT, "STATIC", "", (135, 404, 508, 25), 0);
+        self.refresh_home();
+    }
+
+    fn refresh_home(&self) {
+        if self.panel != Panel::Home {
+            return;
+        }
+        let label = self.rows.first().map_or_else(
+            || "暂无录音".into(),
+            |(_, label, _)| format!("最近：{label}"),
+        );
+        self.set(HOME_RECENT, &label);
+    }
+
+    fn audio_busy(&self) -> bool {
+        self.working || self.starting || self.stop.is_some() || self.unsaved.is_some()
+    }
+
+    fn import_file(&mut self) {
+        if self.audio_busy() || self.auxiliary_busy {
+            self.status("请先完成当前录音或转写。");
+            return;
+        }
+        match files::pick_wav(self.hwnd) {
+            Ok(Some(path)) => {
+                self.working = true;
+                self.status("正在保存导入的录音…");
+                let updates = self.updates.clone();
+                thread::spawn(move || updates.send(Event::Imported(files::import_wav(&path))));
+            }
+            Ok(None) => {}
+            Err(error) => self.status(error),
+        }
+    }
+
+    fn files_layout(&mut self) {
+        self.heading("转录文件");
+        self.label(
+            "选择 WAV 文件，保存到本地历史并用当前模型转写。",
+            14,
+            110,
+            625,
+        );
+        self.button(IMPORT, "选择 WAV 文件", 14, 150, 156);
+        self.button(NAV_HISTORY, "查看历史", 182, 150, 106);
+    }
+
+    fn guide_layout(&mut self) {
+        self.heading("首次引导");
+        let steps = [
+            (
+                "1 / 4   选择麦克风",
+                "打开设置，测试麦克风并确认有输入。",
+                NAV_DIAGNOSTICS,
+                "打开麦克风测试",
+            ),
+            (
+                "2 / 4   设置快捷键",
+                "在模型设置页点击当前快捷键，按下你想使用的组合。",
+                NAV_MODELS,
+                "配置快捷键",
+            ),
+            (
+                "3 / 4   配置识别模型",
+                "选择模型和识别语言，用内置样本测试转写。",
+                NAV_MODELS,
+                "选择模型",
+            ),
+            (
+                "4 / 4   试录一句话",
+                "返回首页，点击开始录音，试说一句话，再停止并保存。",
+                NAV_HOME,
+                "开始演练",
+            ),
+        ];
+        let (title, detail, target, label) = steps[self.guide_step];
+        self.label(title, 14, 103, 620);
+        self.label(detail, 14, 139, 620);
+        self.button(target, label, 14, 178, 150);
+        if self.guide_step > 0 {
+            self.button(GUIDE_PREV, "上一步", 14, 404, 100);
+        }
+        if self.guide_step < 3 {
+            self.button(GUIDE_NEXT, "下一步", 124, 404, 100);
+        }
+        self.button(NAV_HOME, "结束引导", 234, 404, 112);
+    }
+
+    fn show_panel(&mut self, panel: Panel) {
+        if self.panel == panel {
+            return;
+        }
+        if self.editing || self.auxiliary_busy {
+            self.status("请先完成当前操作。");
+            return;
+        }
+        self.panel = panel;
+        self.layout();
     }
 
     fn combo(&mut self, id: usize, title: &str, y: i32, items: &[&str], selected: usize) {
@@ -656,7 +1005,7 @@ impl Window {
             (132, 100, 510, 26),
             WS_TABSTOP | ES_AUTOHSCROLL as u32,
         );
-        self.label("模型 ID", 14, 139, 110);
+        self.label("转写模型", 14, 139, 110);
         self.control(
             MODEL,
             "COMBOBOX",
@@ -668,7 +1017,7 @@ impl Window {
         self.control(
             FETCH_MODELS,
             "BUTTON",
-            "获取模型",
+            "选择模型",
             (532, 136, 110, 26),
             WS_TABSTOP,
         );
@@ -695,35 +1044,27 @@ impl Window {
             language,
         );
         self.label("全局快捷键", 14, 289, 110);
+        self.control(HOTKEY, "BUTTON", "", (132, 285, 390, 28), WS_TABSTOP);
         self.control(
-            HOTKEY,
-            "COMBOBOX",
-            "",
-            (132, 285, 390, 180),
-            WS_TABSTOP | (CBS_DROPDOWN | CBS_AUTOHSCROLL) as u32,
+            CANCEL_HOTKEY,
+            "BUTTON",
+            "取消",
+            (532, 285, 110, 28),
+            WS_TABSTOP,
         );
-        for binding in [
-            "control_shift_space",
-            "control_shift_d",
-            "key:0:f8",
-            "key:0:vka5",
-        ] {
-            self.send(HOTKEY, CB_ADDSTRING, 0, wide(binding).as_ptr() as isize);
-        }
-        self.set(
-            HOTKEY,
-            self.config
-                .core
-                .asr
-                .windows_toggle_hotkey
-                .as_deref()
-                .unwrap_or("control_shift_space"),
+        self.control(
+            HOTKEY_HINT,
+            "STATIC",
+            "按一次开始听写，再按一次结束。",
+            (132, 316, 510, 23),
+            0,
         );
+        self.show_shortcut();
         self.control(
             FLOAT,
             "BUTTON",
             "显示桌面悬浮按钮",
-            (132, 324, 245, 26),
+            (132, 347, 245, 26),
             WS_TABSTOP | BS_AUTOCHECKBOX as u32,
         );
         self.send(
@@ -757,47 +1098,91 @@ impl Window {
     }
 
     fn fill_history(&mut self) {
+        self.refresh_home();
         if self.panel != Panel::History || self.editing {
             return;
         }
         self.send(LIST, LB_RESETCONTENT, 0, 0);
-        for (_, label, _) in &self.rows {
-            self.send(LIST, LB_ADDSTRING, 0, wide(label).as_ptr() as isize);
+        let query = self.history_query.trim().to_lowercase();
+        self.history_indices.clear();
+        for (index, (_, label, text)) in self.rows.iter().enumerate() {
+            if query.is_empty()
+                || label.to_lowercase().contains(&query)
+                || text.to_lowercase().contains(&query)
+            {
+                self.send(LIST, LB_ADDSTRING, 0, wide(label).as_ptr() as isize);
+                self.history_indices.push(index);
+            }
         }
-        self.selected = self.selected.min(self.rows.len().saturating_sub(1));
-        self.send(LIST, LB_SETCURSEL, self.selected, 0);
+        self.selected = self
+            .history_indices
+            .iter()
+            .copied()
+            .find(|&index| index == self.selected)
+            .or_else(|| self.history_indices.first().copied())
+            .unwrap_or(usize::MAX);
+        self.select_visible_row();
         self.show_body();
+    }
+
+    fn select_visible_row(&self) {
+        let index = self
+            .history_indices
+            .iter()
+            .position(|&index| index == self.selected);
+        self.send(LIST, LB_SETCURSEL, index.unwrap_or(usize::MAX), 0);
     }
 
     fn select(&mut self) {
         if self.editing {
-            self.send(LIST, LB_SETCURSEL, self.selected, 0);
+            self.select_visible_row();
             return;
         }
         let selected = self.send(LIST, LB_GETCURSEL, 0, 0);
         if selected >= 0 {
-            self.selected = selected as usize;
+            if let Some(&index) = self.history_indices.get(selected as usize) {
+                self.selected = index;
+            }
+            self.organized_visible = false;
             self.show_body();
         }
     }
 
     fn show_body(&self) {
         let text = self.rows.get(self.selected).map_or("", |(_, _, text)| text);
+        let organized = if self.organized_visible {
+            self.selected_draft()
+                .and_then(|path| drafts::list().into_iter().find(|entry| entry.path == path))
+                .and_then(|entry| entry.organized)
+        } else {
+            None
+        };
+        let text = organized.as_ref().map_or(text, |item| item.text.as_str());
         self.set(BODY, &text.replace("\r\n", "\n").replace('\n', "\r\n"));
     }
 
-    fn settings(&mut self) {
-        if self.editing {
-            self.status("请先保存当前改词。");
+    fn selected_draft(&self) -> Option<PathBuf> {
+        match &self.rows.get(self.selected)?.0 {
+            history::Target::Draft(path) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    fn settings(&mut self, choose_model: bool) {
+        if self.editing || self.auxiliary_busy {
+            self.status("请先完成当前操作。");
             return;
         }
         self.open();
         if self.panel == Panel::Settings {
+            if choose_model {
+                self.choose_model();
+            }
             return;
         }
         self.panel = Panel::Settings;
         self.layout();
-        self.fetch_models(false);
+        self.fetch_models(choose_model);
         let updates = self.updates.clone();
         thread::spawn(move || updates.send(Event::Devices(AudioRecorder::get_devices())));
     }
@@ -835,14 +1220,184 @@ impl Window {
         });
     }
 
+    fn selected_shortcut(&self) -> Shortcut {
+        self.config
+            .core
+            .asr
+            .windows_toggle_hotkey
+            .as_deref()
+            .and_then(Shortcut::from_id)
+            .unwrap_or_default()
+    }
+
+    fn show_shortcut(&self) {
+        let capturing = self.shortcut_capture.is_some();
+        self.set(
+            HOTKEY,
+            &if capturing {
+                "请按快捷键…".into()
+            } else {
+                format!("{} · 更改", self.selected_shortcut().label())
+            },
+        );
+        self.set(
+            HOTKEY_HINT,
+            if capturing {
+                "按下任意单键或组合键，松开后保存。"
+            } else if self.hotkey.is_none() {
+                "快捷键未启用，请点击更改后重新设置。"
+            } else {
+                "按一次开始听写，再按一次结束。"
+            },
+        );
+        unsafe {
+            ShowWindow(
+                self.child(CANCEL_HOTKEY),
+                if capturing { SW_SHOWNA } else { SW_HIDE },
+            );
+        }
+    }
+
+    fn begin_shortcut_capture(&mut self) {
+        if self.shortcut_capture.is_some() {
+            return;
+        }
+        if self.starting
+            || self.stop.is_some()
+            || self.working
+            || self.saving_audio
+            || self.unsaved.is_some()
+            || self.auxiliary_busy
+            || self.editing
+            || self.exiting
+        {
+            self.status("请等待录音、转写和保存完成后再更改快捷键。");
+            return;
+        }
+        let previous = self.selected_shortcut();
+        if let Some((handle, _)) = &mut self.hotkey {
+            handle.suspend();
+        }
+        self.shortcut_capture = Some(ShortcutCapture {
+            keys: ShortcutKeys::start(),
+            previous,
+        });
+        self.show_shortcut();
+        unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(self.child(HOTKEY));
+        }
+        self.status("按下任意单键或组合键，松开后保存；点击「取消」保留原快捷键。");
+    }
+
+    fn restore_shortcut_capture(&mut self) -> Option<String> {
+        let capture = self.shortcut_capture.take()?;
+        let error = self
+            .hotkey
+            .as_mut()
+            .and_then(|(handle, _)| handle.resume(capture.previous).err());
+        if error.is_some() {
+            self.hotkey = None;
+        }
+        self.show_shortcut();
+        error.map(|error| format!("原快捷键 {} 恢复失败：{error}", capture.previous.label()))
+    }
+
+    fn cancel_shortcut_capture(&mut self) {
+        let Some(previous) = self
+            .shortcut_capture
+            .as_ref()
+            .map(|capture| capture.previous)
+        else {
+            return;
+        };
+        let error = self.restore_shortcut_capture();
+        self.status(
+            error.unwrap_or_else(|| format!("已取消修改，保留快捷键 {}。", previous.label())),
+        );
+    }
+
+    fn save_shortcut(&mut self, shortcut: Shortcut) {
+        // Register and persist before replacing either the active key or in-memory config.
+        // Other preference controls may contain unsubmitted edits; leave those alone.
+        let mut config = self.config.clone();
+        config.core.asr.windows_toggle_hotkey = Some(shortcut.id());
+        let save = || config.save().map_err(|error| error.to_string());
+        let result = if let Some((handle, _)) = &mut self.hotkey {
+            handle.change(shortcut, save)
+        } else {
+            GlobalHotkey::register(shortcut).and_then(|registration| {
+                save()?;
+                self.hotkey = Some(registration);
+                Ok(())
+            })
+        };
+        match result {
+            Ok(()) => {
+                self.config = config;
+                self.shortcut_capture = None;
+                self.show_shortcut();
+                self.status(format!("全局快捷键已保存：{}。", shortcut.label()));
+            }
+            Err(error) => {
+                let restore_error = self.restore_shortcut_capture();
+                self.status(match restore_error {
+                    Some(restore_error) => format!("{error}；{restore_error}"),
+                    None => format!("{error}；已保留原快捷键。"),
+                });
+            }
+        }
+    }
+
+    fn capture_shortcut(&mut self, message: &MSG) -> bool {
+        if self.shortcut_capture.is_none() {
+            return false;
+        }
+        let belongs = message.hwnd == self.hwnd || unsafe { IsChild(self.hwnd, message.hwnd) != 0 };
+        if belongs && hotkey_capture::is_keyboard_message(message.message) {
+            let event = self
+                .shortcut_capture
+                .as_mut()
+                .and_then(|capture| capture.keys.message(message));
+            match event {
+                Some(ShortcutEvent::Preview(shortcut)) => {
+                    self.set(
+                        HOTKEY,
+                        &shortcut.map_or_else(|| "请按快捷键…".into(), Shortcut::label),
+                    );
+                    self.set(
+                        HOTKEY_HINT,
+                        &shortcut.map_or_else(
+                            || "按下任意单键或组合键，松开后保存。".into(),
+                            |shortcut| format!("松开 {} 后保存。", shortcut.label()),
+                        ),
+                    );
+                }
+                Some(ShortcutEvent::Chosen(shortcut)) => self.save_shortcut(shortcut),
+                None => {}
+            }
+            return true;
+        }
+        if matches!(
+            message.message,
+            WM_LBUTTONDOWN
+                | WM_RBUTTONDOWN
+                | WM_MBUTTONDOWN
+                | WM_XBUTTONDOWN
+                | WM_NCLBUTTONDOWN
+                | WM_NCRBUTTONDOWN
+        ) && message.hwnd != self.child(HOTKEY)
+            && message.hwnd != self.child(CANCEL_HOTKEY)
+        {
+            self.cancel_shortcut_capture();
+        }
+        false
+    }
+
     fn save_preferences(&mut self) {
         if self.auxiliary_busy {
             return;
         }
-        let Some(shortcut) = Shortcut::from_id(self.text(HOTKEY).trim()) else {
-            self.status("请选择预设，或填写有效的快捷键 ID。");
-            return;
-        };
+        let shortcut = self.selected_shortcut();
         let index = self.send(DEVICE, CB_GETCURSEL, 0, 0);
         let device = if index > 0 {
             self.devices.get(index as usize - 1)
@@ -894,6 +1449,14 @@ impl Window {
         self.fetch_models(false);
     }
 
+    fn choose_model(&mut self) {
+        if self.model_catalog.is_some() {
+            self.send(MODEL, CB_SHOWDROPDOWN, 1, 0);
+        } else {
+            self.fetch_models(true);
+        }
+    }
+
     fn enable_model_fetch(&self, enabled: bool) {
         unsafe { EnableWindow(self.child(FETCH_MODELS), i32::from(enabled)) };
     }
@@ -914,6 +1477,7 @@ impl Window {
     fn clear_models(&mut self) {
         self.model_catalog_request += 1;
         self.model_catalog = None;
+        self.loading_model_catalog = false;
         self.fill_models(&[]);
         self.enable_model_fetch(!self.is_volc());
         if self.status == LOADING_MODELS {
@@ -952,16 +1516,20 @@ impl Window {
         let Some(key) = self.service_key(&address, false, announce) else {
             return;
         };
-        self.model_catalog_request += 1;
-        let request = self.model_catalog_request;
-        self.enable_model_fetch(false);
         if announce {
             self.status(LOADING_MODELS);
         }
+        if self.loading_model_catalog {
+            return;
+        }
+        self.loading_model_catalog = true;
+        self.model_catalog_request += 1;
+        let request = self.model_catalog_request;
+        self.enable_model_fetch(false);
         let updates = self.updates.clone();
         thread::spawn(move || {
             let result = engines::list_models(&address, &key);
-            updates.send(Event::ModelCatalog(request, announce, result));
+            updates.send(Event::ModelCatalog(request, result));
         });
     }
 
@@ -978,7 +1546,7 @@ impl Window {
         let catalog_endpoint = if volc {
             None
         } else if let Some(catalog) = &self.model_catalog {
-            if model.is_empty() && catalog.models.len() > 1 {
+            if model.is_empty() {
                 self.status("请从下拉框选择要使用的模型。");
                 return;
             }
@@ -1054,10 +1622,108 @@ impl Window {
     }
 
     fn command(&mut self, id: usize) {
+        if !matches!(id, HOTKEY | CANCEL_HOTKEY) {
+            self.cancel_shortcut_capture();
+        }
+        if self.diagnostics_command(id) || self.benchmark_command(id) {
+            return;
+        }
         match id {
+            HOTKEY => self.begin_shortcut_capture(),
+            CANCEL_HOTKEY => self.cancel_shortcut_capture(),
             RECORD => self.toggle(false, None),
-            SETTINGS => self.settings(),
+            SETTINGS => self.settings(false),
+            NAV_MODELS | HOME_MODELS => self.settings(true),
             TERMS => self.dictionary(),
+            NAV_HOME => self.show_panel(Panel::Home),
+            NAV_HISTORY => self.show_panel(Panel::History),
+            NAV_FILES => self.show_panel(Panel::Files),
+            NAV_GUIDE => self.show_panel(Panel::Guide),
+            NAV_DIAGNOSTICS => self.show_panel(Panel::Diagnostics),
+            NAV_ORGANIZER => self.show_panel(Panel::Organizer),
+            NAV_BENCHMARK => self.show_panel(Panel::Benchmark),
+            GUIDE_NEXT | GUIDE_PREV if self.panel == Panel::Guide => {
+                self.guide_step = if id == GUIDE_NEXT {
+                    (self.guide_step + 1).min(3)
+                } else {
+                    self.guide_step.saturating_sub(1)
+                };
+                self.layout();
+            }
+            IMPORT => self.import_file(),
+            EXPORT if !self.editing => {
+                let text = self.text(BODY);
+                if text.trim().is_empty() {
+                    self.status("请先选择有转写的录音。");
+                } else {
+                    match files::export_text(self.hwnd, &text) {
+                        Ok(true) => self.status("文字已导出。"),
+                        Ok(false) => {}
+                        Err(error) => self.status(error),
+                    }
+                }
+            }
+            ORGANIZED if !self.editing => {
+                if self.organized_visible {
+                    self.organized_visible = false;
+                    self.show_body();
+                    self.status("已显示 ASR 原文。");
+                } else if self
+                    .selected_draft()
+                    .and_then(|path| drafts::list().into_iter().find(|entry| entry.path == path))
+                    .is_some_and(|entry| entry.organized.is_some())
+                {
+                    self.organized_visible = true;
+                    self.show_body();
+                    self.status("已显示整理稿。");
+                } else {
+                    self.status("这条录音还没有整理稿。");
+                }
+            }
+            THEME if !self.auxiliary_busy && !self.editing => {
+                let mut config = self.config.clone();
+                config.appearance.theme = if config.appearance.theme == "light" {
+                    "dark"
+                } else {
+                    "light"
+                }
+                .into();
+                match config.save() {
+                    Ok(()) => {
+                        theme::set_palette(&config.appearance.theme);
+                        self.config = config;
+                        // Repaint without recreating controls or discarding unsaved settings.
+                        let label = if self.config.appearance.theme == "light" {
+                            "深色主题"
+                        } else {
+                            "浅色主题"
+                        };
+                        self.set(THEME, label);
+                        unsafe {
+                            RedrawWindow(
+                                self.hwnd,
+                                null(),
+                                null_mut(),
+                                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                            );
+                        }
+                    }
+                    Err(error) => self.status(error.to_string()),
+                }
+            }
+            FORGET_TERM if !self.auxiliary_busy => {
+                let word = self.text(TERM_TO_FORGET);
+                if !word.trim().is_empty() {
+                    match terms::forget_learned(word.trim()).and_then(|_| terms::learned()) {
+                        Ok(learned) => {
+                            self.set(LEARNED, &learned.join("\r\n"));
+                            self.set(TERM_TO_FORGET, "");
+                            self.status("已移除学习词。");
+                        }
+                        Err(error) => self.status(error.to_string()),
+                    }
+                }
+            }
             tray::OPEN => self.open(),
             tray::EXIT => {
                 if self.editing {
@@ -1092,11 +1758,10 @@ impl Window {
                 }
             }
             BACK if !self.auxiliary_busy => {
-                self.panel = Panel::History;
-                self.layout();
+                self.show_panel(Panel::History);
             }
             DETECT => self.check_service(true),
-            FETCH_MODELS => self.fetch_models(true),
+            FETCH_MODELS => self.choose_model(),
             CHECK => self.check_service(false),
             PREFERENCES => self.save_preferences(),
             SAVE_TERMS => self.save_terms(),
@@ -1124,6 +1789,8 @@ impl Window {
                     .get(self.selected)
                     .is_some_and(|(_, _, text)| !text.is_empty()) =>
             {
+                self.organized_visible = false;
+                self.show_body();
                 self.editing = true;
                 self.send(BODY, EM_SETREADONLY, 0, 0);
                 unsafe {
@@ -1204,6 +1871,9 @@ impl Window {
     }
 
     fn toggle(&mut self, external: bool, path: Option<PathBuf>) {
+        if self.shortcut_capture.is_some() {
+            return;
+        }
         if self.editing {
             self.status("请先保存当前改词。");
             return;
@@ -1241,7 +1911,22 @@ impl Window {
 
     fn update(&mut self) {
         while let Ok(event) = self.events.try_recv() {
+            let Some(event) = self.diagnostics_event(event) else {
+                continue;
+            };
             match event {
+                Event::Imported(result) => match result {
+                    Ok(path) => {
+                        self.history_query.clear();
+                        self.panel = Panel::History;
+                        self.layout();
+                        self.retranscribe(path);
+                    }
+                    Err(error) => {
+                        self.working = false;
+                        self.status(error);
+                    }
+                },
                 Event::ClipboardNotice => {
                     if let Some(graphics) = &self.graphics {
                         if let Ok(layer) =
@@ -1288,6 +1973,17 @@ impl Window {
                 Event::Meter(activity, seconds, caption) if self.stop.is_some() => {
                     self.activity = activity;
                     self.elapsed = seconds;
+                    if self.panel == Panel::Home {
+                        self.send(
+                            INPUT_LEVEL,
+                            PBM_SETPOS,
+                            (activity.level.clamp(0., 1.) * 100.) as usize,
+                            0,
+                        );
+                        if self.caption != caption {
+                            self.set(LIVE_TEXT, &caption);
+                        }
+                    }
                     self.caption = caption;
                 }
                 Event::Meter(..) => {}
@@ -1309,6 +2005,7 @@ impl Window {
                     self.startup_stop = None;
                     self.working = false;
                     self.selected = 0;
+                    self.organized_visible = false;
                     self.rows = rows;
                     self.fill_history();
                     self.status(status);
@@ -1358,22 +2055,30 @@ impl Window {
                 }
                 Event::Aux(message) => {
                     self.auxiliary_busy = false;
-                    self.status(message);
+                    if !self.benchmark_report(&message) {
+                        self.status(message);
+                    }
                 }
-                Event::ModelCatalog(request, announce, result) => {
+                Event::ModelCatalog(request, result) => {
                     if self.panel != Panel::Settings || request != self.model_catalog_request {
                         continue;
                     }
+                    self.loading_model_catalog = false;
                     self.enable_model_fetch(true);
                     let message = match result {
                         Ok(catalog) => {
                             self.fill_models(&catalog.models);
                             self.model_catalog = Some(catalog);
+                            if self.status == LOADING_MODELS
+                                && unsafe { GetForegroundWindow() } == self.hwnd
+                            {
+                                self.send(MODEL, CB_SHOWDROPDOWN, 1, 0);
+                            }
                             "请选择模型，然后测试连接或保存。".into()
                         }
                         Err(error) => error,
                     };
-                    if announce && self.status == LOADING_MODELS {
+                    if self.status == LOADING_MODELS {
                         self.status(message);
                     }
                 }
@@ -1394,6 +2099,7 @@ impl Window {
                         Err(error) => self.status(error),
                     }
                 }
+                _ => {}
             }
         }
         if self.exiting
@@ -1456,6 +2162,15 @@ impl Window {
     }
 
     fn timer(&mut self) {
+        if self.shortcut_capture.is_some()
+            && unsafe {
+                GetForegroundWindow() != self.hwnd
+                    || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus()
+                        != self.child(HOTKEY)
+            }
+        {
+            self.cancel_shortcut_capture();
+        }
         let down = speaky_core::hotkey::escape_pressed();
         if down && !self.escape_down && (self.stop.is_some() || self.starting) {
             self.cancel();
@@ -1493,8 +2208,10 @@ impl Window {
             }
             count
         });
-        for _ in 0..presses {
-            self.toggle(true, None);
+        if self.shortcut_capture.is_none() {
+            for _ in 0..presses {
+                self.toggle(true, None);
+            }
         }
         if let Some(play) = &mut self.play {
             match play.is_finished() {

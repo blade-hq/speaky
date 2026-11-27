@@ -5,7 +5,11 @@ mod app;
 #[cfg(windows)]
 mod d2d;
 #[cfg(windows)]
+mod files;
+#[cfg(windows)]
 mod floating;
+#[cfg(windows)]
+mod hotkey_capture;
 #[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
