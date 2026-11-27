@@ -19,6 +19,11 @@ pub const UPDATE: u32 = WM_APP + 1;
 pub type Rows = Vec<(history::Target, String, String)>;
 
 pub enum Event {
+    Imported(Result<PathBuf, String>),
+    OrganizerTest(Result<String, String>),
+    MicrophoneTest(Result<String, String>),
+    RecognitionTest(Result<String, String>),
+    OrganizedHistory(PathBuf, Result<(), String>),
     Started(Sender<StopRequest>),
     ClipboardNotice,
     History(Rows),
@@ -30,7 +35,7 @@ pub enum Event {
     TranscriptionFailed(PathBuf, String, Rows),
     Unsaved(Pending, String),
     Settings(Result<(Config, String), String>),
-    ModelCatalog(u64, bool, Result<engines::ModelCatalog, String>),
+    ModelCatalog(u64, Result<engines::ModelCatalog, String>),
     Devices(Vec<(u32, String)>),
     Dictionary(Result<(String, Vec<String>), String>),
 }
@@ -183,7 +188,8 @@ fn record(
                 }
             }
         }
-        if decoding.is_none()
+        if !engines::uses_gemini_asr(&config)
+            && decoding.is_none()
             && preview
                 .retry_after
                 .is_none_or(|time| Instant::now() >= time)

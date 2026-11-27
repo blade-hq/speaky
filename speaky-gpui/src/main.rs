@@ -4,6 +4,7 @@
 mod benchmark;
 #[cfg(windows)]
 mod benchmark_ui;
+#[cfg(target_os = "macos")]
 mod clipboard_notice;
 mod correction_ui;
 mod diagnostics;
@@ -19,12 +20,17 @@ mod model_picker;
 mod onboarding;
 mod overlay;
 mod polish_ui;
+mod redesign_config;
+mod redesign_files;
+mod redesign_home;
+mod redesign_library;
 #[cfg(any(target_os = "macos", windows))]
 mod service_ui;
 mod settings;
 mod studio_ui;
 #[cfg(any(target_os = "macos", windows))]
 mod terms_ui;
+mod theme;
 #[cfg(windows)]
 mod window_chrome;
 #[cfg(windows)]
@@ -38,10 +44,10 @@ use gpui::{
     Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions,
 };
 use icons::Icon;
-use onboarding::{Anchor, Step};
+use onboarding::{Anchor, PracticeIssue, Step};
 use speaky_core::{
     audio, config, drafts, engines, history, hotkey, model_packs, pipeline, playback, polish,
-    polish_benchmark, polish_preferences,
+    polish_benchmark,
     session::{is_silent_recording, LivePreview, SILENT_INPUT},
     terms,
 };
@@ -52,21 +58,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-const BACKGROUND: u32 = 0xf5f5f2;
-const RAIL: u32 = 0xeceee9;
-const SURFACE: u32 = 0xffffff;
-const SIDEBAR: u32 = 0xe9eee9;
-const INK: u32 = 0x202924;
-const MUTED: u32 = 0x526159;
-const BORDER: u32 = 0xd7dfd8;
-const ACCENT: u32 = 0x285848;
-const ACCENT_INK: u32 = 0xffffff;
-const SELECTION: u32 = 0xdcebe1;
-const ERROR: u32 = 0x973a30;
+use theme::{
+    accent as ACCENT, accent_ink as ACCENT_INK, background as BACKGROUND, border as BORDER,
+    error as ERROR, ink as INK, muted as MUTED, rail as RAIL, selection as SELECTION,
+    sidebar as SIDEBAR, surface as SURFACE,
+};
+#[cfg(target_os = "macos")]
+const CLIPBOARD_FALLBACK_MESSAGE: &str = "语音识别内容已保存到剪贴板，请手动粘贴";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Home,
+    Models,
+    Files,
     History,
     Terms,
     Settings,
@@ -110,9 +114,40 @@ impl Recording {
 enum RecordingDestination {
     Archive,
     #[cfg(windows)]
-    External(Option<dictation_target::DictationTarget>),
+    External(WindowsDestination),
     #[cfg(target_os = "macos")]
     MacExternal,
+}
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct WindowsDestination {
+    target: Result<dictation_target::DictationTarget, String>,
+    wechat: bool,
+}
+
+#[cfg(windows)]
+impl WindowsDestination {
+    fn capture_start() -> Self {
+        let focus = dictation_target::StopFocus::capture();
+        let target = match dictation_target::DictationTarget::capture_foreground() {
+            dictation_target::Foreground::External(Some(target)) => Ok(target),
+            _ => Err("开始时未找到输入框。".into()),
+        };
+        let wechat = focus.is_wechat() || target.as_ref().is_ok_and(|target| target.is_wechat());
+        Self { target, wechat }
+    }
+
+    fn capture_stop(&self) -> Self {
+        let focus = dictation_target::StopFocus::capture();
+        let wechat = self.wechat || focus.is_wechat();
+        let target = if self.wechat && self.target.is_err() {
+            self.target.clone()
+        } else {
+            dictation_target::DictationTarget::capture_stopped(focus, self.target.as_ref().ok())
+        };
+        Self { target, wechat }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,7 +169,7 @@ struct Speaky {
     starting: bool,
     stop_after_start: Option<bool>,
     #[cfg(windows)]
-    startup_target: Option<Result<dictation_target::DictationTarget, String>>,
+    startup_target: Option<WindowsDestination>,
     #[cfg(target_os = "macos")]
     mac_delivery: Option<Result<Option<mac_dictation::Target>, String>>,
     #[cfg(target_os = "macos")]
@@ -143,7 +178,8 @@ struct Speaky {
     hotkey_status: String,
     #[cfg(target_os = "macos")]
     mac_dictation_access: bool,
-    status: String,
+    feedback: Option<(Page, String)>,
+    transcript_feedback: Option<(PathBuf, String)>,
     result: Option<(history::Target, String)>,
     correction: correction_ui::CorrectionEditor,
     transcribing: bool,
@@ -156,7 +192,7 @@ struct Speaky {
     benchmark: benchmark_ui::BenchmarkPage,
     archive: Vec<drafts::Entry>,
     saved_recording: Option<PathBuf>,
-    unsaved: Option<PendingSave>,
+    unsaved: Option<(PendingSave, String)>,
     // Keep the last visible words on screen while the complete recording is decoded.
     finalizing_preview: String,
     overlay: Option<WindowHandle<overlay::RecordingOverlay>>,
@@ -168,14 +204,48 @@ struct Speaky {
     invalid_terms: Option<String>,
     settings: settings::SettingsPage,
     organizer_enabled: bool,
-    organizer_learning: bool,
     organizer: polish_ui::Organizer,
     diagnostics: diagnostics::Diagnostics,
+    redesign_home: redesign_home::RedesignHome,
+    redesign_config: redesign_config::RedesignConfig,
+    redesign_files: redesign_files::RedesignFiles,
+    redesign_library: redesign_library::RedesignLibrary,
 }
 
 impl Speaky {
     fn studio_controls_active(&self) -> bool {
-        !self.tour.is_active()
+        !self.tour.at(Step::Welcome)
+    }
+
+    fn set_feedback(&mut self, page: Page, message: impl Into<String>) {
+        let message = message.into();
+        if message.is_empty() {
+            self.clear_feedback(page);
+        } else {
+            self.feedback = Some((page, message));
+        }
+    }
+
+    fn feedback_for(&self, page: Page) -> Option<&str> {
+        self.feedback
+            .as_ref()
+            .filter(|(source, _)| *source == page)
+            .map(|(_, message)| message.as_str())
+    }
+
+    fn clear_feedback(&mut self, page: Page) {
+        self.feedback.take_if(|(source, _)| *source == page);
+    }
+
+    fn transcript_feedback_for(&self, path: &std::path::Path) -> Option<&str> {
+        self.transcript_feedback
+            .as_ref()
+            .filter(|(draft, _)| draft == path)
+            .map(|(_, message)| message.as_str())
+    }
+
+    fn set_transcript_feedback(&mut self, draft: PathBuf, message: String) {
+        self.transcript_feedback = (!message.is_empty()).then_some((draft, message));
     }
 
     fn new(
@@ -201,7 +271,8 @@ impl Speaky {
             hotkey_status,
             #[cfg(target_os = "macos")]
             mac_dictation_access: mac_dictation::has_access(),
-            status: String::new(),
+            feedback: None,
+            transcript_feedback: None,
             result: history::latest(&archive),
             correction: correction_ui::CorrectionEditor::default(),
             transcribing: false,
@@ -225,9 +296,12 @@ impl Speaky {
             invalid_terms: None,
             settings: settings::SettingsPage::default(),
             organizer_enabled: organizer.enabled,
-            organizer_learning: organizer.learns_preferences(),
             organizer: polish_ui::Organizer::default(),
             diagnostics: diagnostics::Diagnostics::default(),
+            redesign_home: Default::default(),
+            redesign_config: Default::default(),
+            redesign_files: Default::default(),
+            redesign_library: Default::default(),
         }
     }
 
@@ -263,19 +337,22 @@ impl Speaky {
 
     fn finish_recording(&mut self, cancelled: bool, cx: &mut Context<Self>) {
         if self.starting {
-            self.stop_after_start = Some(cancelled);
             #[cfg(windows)]
             {
-                if !cancelled {
-                    self.startup_target =
-                        Some(dictation_target::DictationTarget::capture_at_stop(None));
+                if !cancelled && self.stop_after_start != Some(false) {
+                    self.startup_target = self
+                        .startup_target
+                        .as_ref()
+                        .map(WindowsDestination::capture_stop);
                 }
             }
+            self.stop_after_start = Some(cancelled);
             #[cfg(target_os = "macos")]
             {
                 self.mac_delivery = Some(mac_dictation::Target::capture());
             }
-            self.status = "麦克风准备后将停止并保存。".into();
+            self.set_feedback(Page::Home, "麦克风准备后将停止并保存。");
+            self.close_overlay(cx);
             cx.notify();
             return;
         }
@@ -283,14 +360,15 @@ impl Speaky {
             return;
         };
         #[cfg(windows)]
-        if let RecordingDestination::External(previous) = &recording.destination {
+        if let RecordingDestination::External(previous) = &mut recording.destination {
             if cancelled {
-                if let Some(target) = previous.clone() {
+                self.startup_target = None;
+                if let Ok(target) = previous.target.clone() {
                     let task = cx.background_spawn(async move { target.cancel_preview() });
                     cx.spawn(async move |entity, cx| {
                         if let Err(error) = task.await {
                             let _ = entity.update(cx, |view, cx| {
-                                view.status = format!("录音已保留。{error}");
+                                view.set_feedback(Page::Home, format!("录音已保留。{error}"));
                                 cx.notify();
                             });
                         }
@@ -298,14 +376,10 @@ impl Speaky {
                     .detach();
                 }
             } else {
-                recording.destination = RecordingDestination::External(
-                    self.startup_target
-                        .take()
-                        .unwrap_or_else(|| {
-                            dictation_target::DictationTarget::capture_at_stop(previous.as_ref())
-                        })
-                        .ok(),
-                );
+                *previous = self
+                    .startup_target
+                    .take()
+                    .unwrap_or_else(|| previous.capture_stop());
             }
         }
         #[cfg(target_os = "macos")]
@@ -322,9 +396,10 @@ impl Speaky {
         self.close_overlay(cx);
         let audio = recording.recorder.stop();
         if audio.is_empty() {
-            self.status = "没有收到音频，请检查麦克风权限。".into();
-            if self.tour.at(Step::Record) {
-                self.tour.record_issue = true;
+            self.set_feedback(Page::Home, "没有收到音频，请检查麦克风权限。");
+            if !cancelled && self.tour.is_practice_draft(&recording.draft) {
+                self.tour.issue = Some(PracticeIssue::Microphone);
+                self.tour.request_reveal();
             }
             #[cfg(windows)]
             {
@@ -346,9 +421,6 @@ impl Speaky {
                 },
                 cx,
             );
-            if cancelled && self.unsaved.is_none() {
-                self.status = "已取消转写，原始录音已保存在历史中。".into();
-            }
         }
         cx.notify();
     }
@@ -359,27 +431,23 @@ impl Speaky {
             Ok(()) => {
                 self.archive = drafts::list();
                 self.saved_recording = Some(pending.draft.clone());
-                self.status = if silent {
-                    format!("录音已保存。{SILENT_INPUT}")
+                if silent {
+                    self.set_feedback(Page::Home, format!("录音已保存。{SILENT_INPUT}"));
                 } else {
-                    String::new()
-                };
+                    self.clear_feedback(Page::Home);
+                }
                 if !silent && pending.transcribe_after_save {
-                    if self.tour.at(Step::Record)
-                        && self.page == Page::Home
-                        && matches!(&pending.destination, RecordingDestination::Archive)
-                    {
-                        self.tour.copied = false;
-                        self.show_tour_step(Step::Result, cx);
-                    }
                     self.transcribe(pending.draft, pending.destination, cx);
-                } else if silent && self.tour.at(Step::Record) {
-                    self.tour.record_issue = true;
+                } else if silent
+                    && pending.transcribe_after_save
+                    && self.tour.is_practice_draft(&pending.draft)
+                {
+                    self.tour.issue = Some(PracticeIssue::Microphone);
+                    self.tour.request_reveal();
                 }
             }
             Err(error) => {
-                self.status = format!("保存失败：{error}。音频仍在内存，请重试保存。");
-                self.unsaved = Some(pending);
+                self.unsaved = Some((pending, error.to_string()));
             }
         }
     }
@@ -397,15 +465,11 @@ impl Speaky {
             self.mac_delivery_generation = uuid::Uuid::new_v4();
         }
         self.model_picker.close();
+        self.model_picker.unload_feedback = None;
         // Capture the editor for live previews while the microphone opens.
         #[cfg(windows)]
         let destination = if source == RecordingStart::Desktop {
-            match dictation_target::DictationTarget::capture_foreground() {
-                dictation_target::Foreground::Speaky => RecordingDestination::External(None),
-                dictation_target::Foreground::External(target) => {
-                    RecordingDestination::External(target)
-                }
-            }
+            RecordingDestination::External(WindowsDestination::capture_start())
         } else {
             RecordingDestination::Archive
         };
@@ -421,13 +485,23 @@ impl Speaky {
         self.stop_after_start = None;
         #[cfg(windows)]
         {
-            self.startup_target = None;
+            self.startup_target = match &destination {
+                RecordingDestination::External(target) => Some(target.clone()),
+                _ => None,
+            };
         }
         #[cfg(target_os = "macos")]
         {
             self.mac_delivery = None;
         }
-        self.status = "正在打开麦克风…".into();
+        self.clear_feedback(Page::Home);
+        #[cfg(windows)]
+        if source == RecordingStart::Desktop
+            && self.floating.is_none()
+            && !self.tour.is_practice_draft(&draft)
+        {
+            self.show_recording_overlay(cx);
+        }
         cx.notify();
         let opening_draft = draft.clone();
         let task = cx.background_spawn(async move {
@@ -444,11 +518,11 @@ impl Speaky {
                 view.starting = false;
                 match result {
                     Ok((recorder, preview)) => {
-                        view.tour.record_issue = false;
-                        if view.tour.at(Step::Record) {
+                        let practice = view.tour.is_practice_draft(&draft);
+                        if practice {
+                            view.tour.issue = None;
                             view.tour.request_reveal();
                         }
-                        view.close_overlay(cx);
                         view.stop_playback();
                         view.finalizing_preview.clear();
                         view.transcript_scroll.set_offset(point(px(0.), px(0.)));
@@ -464,7 +538,7 @@ impl Speaky {
                             #[cfg(windows)]
                             delivery_issue: None,
                         });
-                        view.status.clear();
+                        view.clear_feedback(Page::Home);
                         #[cfg(windows)]
                         {
                             view.floating_retry = false;
@@ -472,17 +546,37 @@ impl Speaky {
                         if let Some(cancelled) = view.stop_after_start.take() {
                             view.finish_recording(cancelled, cx);
                         } else {
-                            view.show_recording_overlay(cx);
+                            #[cfg(windows)]
+                            {
+                                view.startup_target = None;
+                            }
+                            if !practice {
+                                if let Some(handle) = view.overlay {
+                                    let _ = handle.update(cx, |panel, _, cx| {
+                                        panel.recording_started(cx);
+                                    });
+                                } else {
+                                    view.show_recording_overlay(cx);
+                                }
+                            }
                         }
                     }
                     Err(error) => {
-                        view.status = error;
+                        view.close_overlay(cx);
+                        let page = if source == RecordingStart::Resume {
+                            Page::History
+                        } else {
+                            Page::Home
+                        };
+                        view.set_feedback(page, error);
                         view.stop_after_start = None;
-                        if view.tour.at(Step::Record) {
-                            view.tour.record_issue = true;
+                        if view.tour.is_practice_draft(&draft) {
+                            view.tour.issue = Some(PracticeIssue::Microphone);
+                            view.tour.request_reveal();
                         }
                         #[cfg(windows)]
                         {
+                            view.startup_target = None;
                             view.floating_retry = true;
                         }
                     }
@@ -494,14 +588,16 @@ impl Speaky {
     }
 
     fn show_recording_overlay(&mut self, cx: &mut Context<Self>) {
-        let Some(recording) = &self.recording else {
-            return;
+        let show_caption = match &self.recording {
+            Some(recording) => recording.preview_enabled,
+            None if self.starting => true,
+            None => return,
         };
         #[cfg(windows)]
         let show_controls = self.floating.is_none();
         #[cfg(not(windows))]
         let show_controls = true;
-        if self.overlay.is_some() || (!show_controls && !recording.preview_enabled) {
+        if self.overlay.is_some() || (!show_controls && !show_caption) {
             return;
         }
         let finish = cx.weak_entity();
@@ -509,7 +605,8 @@ impl Speaky {
         match overlay::RecordingOverlay::open(
             cx,
             show_controls,
-            recording.preview_enabled,
+            show_caption,
+            self.starting,
             move |cx| {
                 let _ = finish.update(cx, Speaky::stop_recording);
             },
@@ -518,7 +615,7 @@ impl Speaky {
             },
         ) {
             Ok(overlay) => self.overlay = Some(overlay),
-            Err(error) => self.status = format!("录音中，悬浮窗未能打开：{error}"),
+            Err(error) => self.set_feedback(Page::Home, format!("录音浮条未能打开：{error}")),
         }
     }
 
@@ -535,7 +632,9 @@ impl Speaky {
                 cx,
                 move |cx| {
                     let _ = app.update(cx, |view, cx| {
-                        view.toggle_recording(RecordingStart::Desktop, cx)
+                        if !view.handle_tour_floating_click(cx) {
+                            view.toggle_recording(RecordingStart::Desktop, cx);
+                        }
                     });
                 },
                 move |cx| {
@@ -570,6 +669,8 @@ impl Speaky {
         } else {
             let state = if self.starting {
                 State::Busy("正在打开麦克风…")
+            } else if self.tour.preparing {
+                State::Busy("正在准备录音…")
             } else if self.transcribing {
                 State::Transcribing
             } else if self.unsaved.is_some() {
@@ -599,19 +700,22 @@ impl Speaky {
     fn save_before_exit(&mut self, cx: &mut Context<Self>) {
         if self.starting {
             self.stop_after_start = Some(true);
-            self.status = "正在打开麦克风，停止并保存后即可退出。".into();
+            self.set_feedback(self.page, "麦克风准备后将停止并保存。");
             cx.notify();
             return;
         }
         if let Some(recording) = &mut self.recording {
             #[cfg(windows)]
-            if let RecordingDestination::External(Some(target)) = &recording.destination {
+            if let RecordingDestination::External(WindowsDestination {
+                target: Ok(target), ..
+            }) = &recording.destination
+            {
                 target.stop_preview();
             }
             recording.destination = RecordingDestination::Archive;
             recording.preview_enabled = false;
         }
-        if let Some(pending) = &mut self.unsaved {
+        if let Some((pending, _)) = &mut self.unsaved {
             pending.destination = RecordingDestination::Archive;
             pending.transcribe_after_save = false;
         }
@@ -629,7 +733,7 @@ impl Speaky {
     fn checkpoint(&mut self, cx: &mut Context<Self>) {
         if let Some(recording) = &mut self.recording {
             if let Err(error) = drafts::save(&recording.draft, &recording.recorder.wav_snapshot()) {
-                self.status = format!("保存录音草稿失败：{error}");
+                self.set_feedback(Page::Home, format!("保存录音草稿失败：{error}"));
                 cx.notify();
             }
         }
@@ -656,10 +760,11 @@ impl Speaky {
         {
             let issue = match &recording.destination {
                 RecordingDestination::Archive => None,
-                RecordingDestination::External(None) => {
-                    Some("开始时未找到输入框。结束后会尝试写入当前输入框。".into())
-                }
-                RecordingDestination::External(Some(target)) => target.delivery_issue(),
+                RecordingDestination::External(destination) => match &destination.target {
+                    Ok(target) => target.delivery_issue(),
+                    Err(error) if destination.wechat => Some(error.clone()),
+                    Err(_) => Some("开始时未找到输入框。结束后会尝试写入当前输入框。".into()),
+                },
             };
             if recording.delivery_issue != issue {
                 recording.delivery_issue = issue;
@@ -686,84 +791,23 @@ impl Speaky {
             recording.preview.phrase_start =
                 chunk.next_start_after_quiet(recording.preview.phrase_start);
             recording.preview.last_decoded = chunk.end;
-            if self.status != SILENT_INPUT
+            if recording.preview.error.as_deref() != Some(SILENT_INPUT)
                 && recording.preview.text.is_empty()
                 && recording.recorder.get_audio_level() == 0.0
             {
-                self.status = SILENT_INPUT.into();
+                recording.preview.error = Some(SILENT_INPUT.into());
                 cx.notify();
             }
             return;
         }
-        if self.status == SILENT_INPUT {
-            self.status.clear();
+        if recording.preview.error.as_deref() == Some(SILENT_INPUT) {
+            recording.preview.error = None;
             cx.notify();
         }
         let draft = recording.draft.clone();
         let generation = recording.generation;
         recording.preview_pending = Some(generation);
         self.preview(draft, generation, chunk, cx);
-    }
-
-    fn activity(&self) -> Div {
-        let mut counts = [0_usize; 7];
-        for entry in &self.archive {
-            if let Some(days) = entry
-                .modified
-                .and_then(|time| time.elapsed().ok())
-                .map(|elapsed| elapsed.as_secs() / 86400)
-                .filter(|days| *days < 7)
-            {
-                counts[6 - days as usize] += 1;
-            }
-        }
-        let highest = (*counts.iter().max().unwrap_or(&0)).max(1) as f32;
-        card()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("近七天"))
-            .child(
-                div()
-                    .mt_3()
-                    .flex()
-                    .gap_1()
-                    .children(counts.into_iter().enumerate().map(|(index, count)| {
-                        let label = if index == 6 {
-                            "24 小时".into()
-                        } else {
-                            format!("{} 天前", 6 - index)
-                        };
-                        let tooltip = format!("{label} · {count} 条录音");
-                        div()
-                            .id(("activity-day", index))
-                            .flex_1()
-                            .min_w(px(0.))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div().h(px(37.)).flex().items_end().child(
-                                    div()
-                                        .w(px(12.))
-                                        .h(px(3. + 32. * count as f32 / highest))
-                                        .rounded_full()
-                                        .bg(rgb(if count == 0 { BORDER } else { ACCENT })),
-                                ),
-                            )
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| ActionTooltip(tooltip.clone().into())).into()
-                            })
-                    })),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .flex()
-                    .justify_between()
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child("6 天前")
-                    .child("近 24 小时"),
-            )
     }
 
     fn preview(
@@ -777,7 +821,9 @@ impl Speaky {
         self.model_picker.pending_previews += 1;
         let task = cx.background_spawn(async move {
             let config = config::Config::load().map_err(|error| error.to_string())?;
-            let engine = engines::recognition_engine(&config)?;
+            let Some(engine) = engines::preview_recognition_engine(&config)? else {
+                return Ok(String::new());
+            };
             terms::transcribe(
                 engine.as_ref(),
                 &wav,
@@ -807,7 +853,10 @@ impl Speaky {
                         recording.preview.error = None;
                         recording.preview.retry_after = None;
                         #[cfg(windows)]
-                        if let RecordingDestination::External(Some(target)) = &recording.destination
+                        if let RecordingDestination::External(WindowsDestination {
+                            target: Ok(target),
+                            ..
+                        }) = &recording.destination
                         {
                             target.preview(&recording.preview.text);
                         }
@@ -852,30 +901,46 @@ impl Speaky {
             self.finalizing_preview.clear();
         }
         let completed_draft = draft.clone();
-        self.status.clear();
+        if self.tour.is_practice_draft(&draft) {
+            self.tour.issue = None;
+        }
+        self.clear_feedback(Page::Home);
+        self.transcript_feedback.take_if(|(path, _)| path == &draft);
         #[cfg(target_os = "macos")]
         let mac_external = matches!(destination, RecordingDestination::MacExternal);
         let task = cx.background_spawn(async move {
             let config = config::Config::load().map_err(|error| error.to_string())?;
-            let transcript = pipeline::transcribe_saved(&config, &draft)
-                .map_err(|error| format!("{error}\n录音已保存至 {}", draft.display()))?;
-            let text = transcript.text;
-            let mut status = transcript.notice;
-            let mut fallback = false;
             #[cfg(windows)]
-            if let RecordingDestination::External(target) = destination {
-                match target
-                    .ok_or_else(|| "停止时未找到可写的输入框。".to_owned())
-                    .and_then(|target| target.deliver(&text))
-                {
-                    Ok(()) => status.push_str(" 已输入到停止时的输入框。"),
-                    Err(error) => {
-                        status.push_str(&format!(" {error}"));
-                        fallback = true;
+            if let RecordingDestination::External(destination) = destination {
+                let original = pipeline::transcribe_original(&config, &draft)?;
+                let delivery = destination.target.and_then(|target| {
+                    target.deliver(&original)?;
+                    Ok(target)
+                });
+                let transcript = pipeline::rewrite_saved(&config, &draft, original.clone());
+                let delivery_notice = match delivery {
+                    Ok(target) if transcript.text != original => {
+                        target.revise(&transcript.text).err().map(|error| {
+                            log::debug!(
+                                "Could not update the external field with the rewrite: {error}"
+                            );
+                            "润色稿未写入，已保存。"
+                        })
                     }
-                }
+                    Ok(_) => None,
+                    Err(error) => {
+                        log::debug!(
+                            "Could not write the transcript to the external field: {error}"
+                        );
+                        Some("未写入输入框，转写已保存。")
+                    }
+                };
+                let status = delivery_notice.map_or(transcript.notice, str::to_owned);
+                return Ok::<_, String>((transcript.text, status, false));
             }
-            Ok::<_, String>((text, status, fallback))
+            let transcript = pipeline::transcribe_saved(&config, &draft)?;
+            let rewrite_completed = config.llm.enabled && transcript.notice.is_empty();
+            Ok::<_, String>((transcript.text, transcript.notice, rewrite_completed))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
@@ -883,9 +948,9 @@ impl Speaky {
                 view.transcribing = false;
                 view.archive = drafts::list();
                 match result {
-                    Ok((text, mut status, fallback)) => {
+                    Ok((text, status, rewrite_completed)) => {
                         #[cfg(target_os = "macos")]
-                        let mut fallback = fallback;
+                        let mut status = status;
                         view.finalizing_preview.clear();
                         if view.saved_recording.as_ref() == Some(&completed_draft) {
                             view.saved_recording = None;
@@ -893,35 +958,58 @@ impl Speaky {
                         view.transcript_scroll.set_offset(point(px(0.), px(0.)));
                         #[cfg(target_os = "macos")]
                         if mac_external {
-                            match view
+                            let needs_clipboard = match view
                                 .mac_delivery
                                 .take()
                                 .unwrap_or_else(|| Err("未找到停止时的输入框。".into()))
                             {
                                 Ok(Some(target)) => {
                                     match target.insert(&text, mac_delivery_generation, cx) {
-                                        Ok(notice) => status.push_str(notice),
+                                        Ok(notice) => {
+                                            status.push_str(notice);
+                                            false
+                                        }
                                         Err(error) => {
                                             status.push_str(&error);
-                                            fallback = true;
+                                            true
                                         }
                                     }
                                 }
-                                Ok(None) => fallback = true,
+                                Ok(None) => true,
                                 Err(error) => {
                                     status.push_str(&error);
-                                    fallback = true;
+                                    true
                                 }
+                            };
+                            if needs_clipboard {
+                                status.push_str(&view.clipboard_fallback(&text, cx));
                             }
                         }
-                        if fallback {
-                            view.clipboard_fallback(&text, cx);
-                            status.push_str(&view.status);
+                        let practice = view.tour.is_practice_draft(&completed_draft);
+                        if practice {
+                            view.show_practice_result(
+                                &completed_draft,
+                                &text,
+                                rewrite_completed,
+                                cx,
+                            );
                         }
+                        view.set_transcript_feedback(completed_draft.clone(), status);
                         view.result = Some((history::Target::Draft(completed_draft), text));
-                        view.status = status;
                     }
-                    Err(error) => view.status = error,
+                    Err(error) => {
+                        let no_speech = error.lines().next() == Some(pipeline::NO_RECOGNIZED_TEXT);
+                        if view.tour.is_practice_draft(&completed_draft) {
+                            view.finalizing_preview.clear();
+                            view.tour.issue = Some(if no_speech {
+                                PracticeIssue::Microphone
+                            } else {
+                                PracticeIssue::Transcription
+                            });
+                            view.tour.request_reveal();
+                        }
+                        view.set_transcript_feedback(completed_draft, error);
+                    }
                 }
                 cx.notify();
             });
@@ -930,12 +1018,14 @@ impl Speaky {
         cx.notify();
     }
 
-    fn clipboard_fallback(&mut self, text: &str, cx: &mut Context<Self>) {
+    #[cfg(target_os = "macos")]
+    fn clipboard_fallback(&self, text: &str, cx: &mut Context<Self>) -> String {
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
-        self.status = clipboard_notice::MESSAGE.into();
+        let mut message = CLIPBOARD_FALLBACK_MESSAGE.to_owned();
         if let Err(error) = clipboard_notice::show(cx) {
-            self.status.push_str(&format!("（{error}）"));
+            message.push_str(&format!("（{error}）"));
         }
+        message
     }
 
     fn compare_recording(&mut self, draft: PathBuf, cx: &mut Context<Self>) {
@@ -949,7 +1039,8 @@ impl Speaky {
         self.model_picker.close();
         self.transcribing = true;
         self.stop_playback();
-        self.status = "正在用所选模型测试这段录音…".into();
+        self.set_transcript_feedback(draft.clone(), "正在用所选模型测试这段录音…".into());
+        let tested_draft = draft.clone();
         let task = cx.background_spawn(async move {
             let audio = std::fs::read(&draft).map_err(|error| error.to_string())?;
             if is_silent_recording(&audio) {
@@ -970,17 +1061,18 @@ impl Speaky {
             }
             drafts::save_comparison(&draft, &model, &text)
                 .map_err(|error| format!("保存模型测试结果失败：{error}"))?;
-            Ok::<_, String>(model)
+            Ok::<_, String>(())
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |view, cx| {
                 view.transcribing = false;
                 view.archive = drafts::list();
-                view.status = match result {
-                    Ok(model) => format!("{model} 的测试结果已显示在录音下方。"),
+                let message = match result {
+                    Ok(()) => String::new(),
                     Err(error) => format!("模型测试失败：{error}"),
                 };
+                view.set_transcript_feedback(tested_draft, message);
                 cx.notify();
             });
         })
@@ -1001,12 +1093,18 @@ fn action(primary: bool) -> Div {
         .items_center()
         .justify_center()
         .rounded(px(7.))
-        .bg(rgb(if primary { ACCENT } else { SIDEBAR }))
-        .text_color(rgb(if primary { ACCENT_INK } else { INK }))
+        .bg(rgb(if primary { ACCENT() } else { SIDEBAR() }))
+        .text_color(rgb(if primary { ACCENT_INK() } else { INK() }))
         .text_size(px(12.))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(if primary { 0x204b3e } else { BORDER })))
+        .hover(|style| {
+            style.bg(rgb(if primary {
+                theme::choose(0xa7b8ff, 0x204b3e)
+            } else {
+                BORDER()
+            }))
+        })
 }
 
 struct ActionTooltip(gpui::SharedString);
@@ -1028,7 +1126,7 @@ fn icon_button(icon: Icon, label: &'static str) -> Stateful<Div> {
     action(false)
         .id(label)
         .w(px(30.))
-        .child(icon.render(INK))
+        .child(icon.render(INK()))
         .tooltip(move |_, cx| cx.new(|_| ActionTooltip(label.into())).into())
 }
 
@@ -1037,8 +1135,8 @@ fn card() -> Div {
         .p_4()
         .rounded(px(12.))
         .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(SURFACE))
+        .border_color(rgb(BORDER()))
+        .bg(rgb(SURFACE()))
 }
 
 fn page_heading(title: &'static str, description: &'static str) -> Div {
@@ -1052,74 +1150,7 @@ fn page_heading(title: &'static str, description: &'static str) -> Div {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(title),
         )
-        .child(div().text_color(rgb(MUTED)).child(description))
-}
-
-fn home_command(title: &'static str, description: &str, color: u32) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_3()
-        .py_2()
-        .min_h(px(58.))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(color))
-                        .child(description.to_owned()),
-                ),
-        )
-}
-
-fn metric(label: &'static str, value: String) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .py_2()
-        .border_b_1()
-        .border_color(rgb(BORDER))
-        .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(label))
-        .child(
-            div()
-                .text_size(px(19.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(value),
-        )
-}
-
-fn history_row() -> Div {
-    div()
-        .group("history-row")
-        .flex()
-        .items_start()
-        .gap_2()
-        .px_2p5()
-        .py_1p5()
-        .border_b_1()
-        .border_color(rgb(BORDER))
-        .hover(|row| row.bg(rgb(0xf3f7f3)))
-}
-
-fn history_meta(label: String) -> Div {
-    div()
-        .w(px(62.))
-        .flex_none()
-        .pt(px(4.))
-        .text_size(px(11.))
-        .line_height(px(15.))
-        .text_color(rgb(MUTED))
-        .child(label)
-}
-
-fn history_actions() -> Div {
-    div().flex_none().flex().items_center().gap_1()
+        .child(div().text_color(rgb(MUTED())).child(description))
 }
 
 impl Speaky {
@@ -1131,7 +1162,7 @@ impl Speaky {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let selected = self.page == page;
-        let color = if selected { ACCENT } else { MUTED };
+        let color = if selected { ACCENT() } else { MUTED() };
         div()
             .id(("sidebar-page", page as usize))
             .relative()
@@ -1141,27 +1172,42 @@ impl Speaky {
             .items_center()
             .gap_2()
             .rounded(px(7.))
-            .when(
-                self.studio_controls_active()
-                    || (page == Page::History && self.tour.at(Step::Result)),
-                |row| {
-                    row.focusable()
-                        .tab_stop(true)
-                        .focus(|row| row.border_1().border_color(rgb(ACCENT)))
-                },
-            )
+            .when(self.studio_controls_active(), |row| {
+                row.focusable()
+                    .tab_stop(true)
+                    .focus(|row| row.border_1().border_color(rgb(ACCENT())))
+            })
             .text_color(rgb(color))
             .when(selected, |row| {
-                row.bg(rgb(SELECTION)).font_weight(FontWeight::SEMIBOLD)
+                row.bg(rgb(SELECTION())).font_weight(FontWeight::SEMIBOLD)
             })
             .child(icon.render(color))
             .child(label)
             .when(page == Page::History, |row| {
                 row.children(self.tour.mark(Anchor::HistoryLink))
             })
+            .when(page == Page::Terms, |row| {
+                row.children(self.tour.mark(Anchor::TermsLink))
+            })
+            .when(page == Page::Files, |row| {
+                row.children(self.tour.mark(Anchor::FilesLink))
+            })
             .cursor_pointer()
-            .hover(|row| row.bg(rgb(if selected { 0xd3e5d9 } else { SIDEBAR })))
-            .on_click(cx.listener(move |view, _, _, cx| view.open_page(page, cx)))
+            .hover(|row| {
+                row.bg(rgb(if selected {
+                    theme::choose(0x3a486f, 0xcfe4d7)
+                } else {
+                    SIDEBAR()
+                }))
+            })
+            .on_click(cx.listener(move |view, _, window, cx| {
+                if view.tour.at(Step::Finish)
+                    && matches!(page, Page::History | Page::Terms | Page::Files)
+                {
+                    view.finish_tour(window, cx);
+                }
+                view.open_page(page, cx);
+            }))
     }
 
     fn settings_control(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -1174,675 +1220,29 @@ impl Speaky {
             .gap_2()
             .child("设置")
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(if selected { SELECTION } else { SURFACE }))
+            .border_color(rgb(BORDER()))
+            .bg(rgb(if selected { SELECTION() } else { SURFACE() }))
             .when(self.studio_controls_active(), |button| {
                 button
                     .focusable()
                     .tab_stop(true)
-                    .focus(|style| style.border_color(rgb(ACCENT)))
+                    .focus(|style| style.border_color(rgb(ACCENT())))
             })
             .on_click(cx.listener(|view, _, _, cx| view.open_page(Page::Settings, cx)))
     }
 
-    fn copy_recent_text(&mut self, cx: &mut Context<Self>) {
-        if let Some((_, text)) = &self.result {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            if self.tour.at(Step::Result) {
-                self.tour.copied = true;
-                cx.notify();
-            }
+    fn copy_practice_result(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.tour.practice_result() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+            self.tour.copied = true;
+            cx.notify();
         }
     }
 
-    fn home(&self, wide: bool, cx: &mut Context<Self>) -> Div {
-        let result_text = self.result.as_ref().map_or("", |(_, text)| text.as_str());
-        let completed = self
-            .archive
-            .iter()
-            .filter(|entry| matches!(entry.state, drafts::State::Transcribed { .. }));
-        let seconds = self
-            .archive
-            .iter()
-            .map(|entry| entry.duration_seconds)
-            .sum::<u64>();
-        let characters: usize = completed
-            .clone()
-            .map(|entry| match &entry.state {
-                drafts::State::Transcribed { text } => text.chars().count(),
-                _ => 0,
-            })
-            .sum();
-        let recording = self.recording.is_some();
-        let preview = self.recording.as_ref().and_then(Recording::caption);
-        let show_preview = self
-            .recording
-            .as_ref()
-            .is_some_and(|recording| recording.preview_enabled);
-        let saved_recording = self
-            .saved_recording
-            .as_ref()
-            .filter(|_| !recording && !self.transcribing && self.unsaved.is_none());
-
-        let can_record =
-            !self.transcribing && self.unsaved.is_none() && !self.recognition_model_busy();
-        let (record_label, record_icon) = if recording {
-            ("停止并保存", Icon::Stop)
-        } else {
-            ("开始录音", Icon::Microphone)
-        };
-        let (record_state, state_color) = if recording {
-            ("录音中", ERROR)
-        } else if self.transcribing {
-            ("正在转写", ACCENT)
-        } else if self.unsaved.is_some() {
-            ("等待保存", ERROR)
-        } else if !can_record {
-            ("模型处理中", ACCENT)
-        } else {
-            ("麦克风待命", ACCENT)
-        };
-        #[cfg(not(target_os = "macos"))]
-        let external_help = "点目标输入框，按快捷键开始，再按一次结束。";
-        #[cfg(target_os = "macos")]
-        let external_help = if self.mac_dictation_access {
-            "辅助功能已授权。点目标输入框，按快捷键开始，再按一次结束。"
-        } else {
-            "当前 Speaky 尚未获得辅助功能权限。"
-        };
-        let controls = card()
-            .p_4()
-            .flex()
-            .flex_col()
-            .child(
-                home_command("在 Speaky 里录音", record_state, state_color)
-                    .relative()
-                    .children(self.tour.mark(Anchor::Record))
-                    .child(
-                        action(true)
-                            .id("record-action")
-                            .relative()
-                            .h(px(39.))
-                            .px_3()
-                            .gap_2()
-                            .text_size(px(13.))
-                            .child(record_icon.render(ACCENT_INK))
-                            .child(record_label)
-                            .children(self.tour.mark(Anchor::RecordButton))
-                            .when(
-                                can_record
-                                    && (self.studio_controls_active()
-                                        || self.tour.at(Step::Record)),
-                                |button| {
-                                    button
-                                        .focusable()
-                                        .tab_stop(true)
-                                        .focus(|style| style.border_2().border_color(rgb(INK)))
-                                },
-                            )
-                            .when(!can_record, |button| button.opacity(0.5).cursor_default())
-                            .when(can_record, |button| {
-                                button.on_click(cx.listener(|view, _, _, cx| {
-                                    view.toggle_recording(RecordingStart::Button, cx)
-                                }))
-                            }),
-                    ),
-            )
-            .child(
-                home_command("在其他应用中听写", external_help, MUTED)
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .when_some(
-                                self.hotkey_status.strip_prefix("全局快捷键 "),
-                                |row, shortcut| row.child(studio_ui::keycap(shortcut)),
-                            )
-                            .child(button("更改", false).id("home-edit-shortcut").on_click(
-                                cx.listener(|view, _, window, cx| {
-                                    view.open_shortcut_settings(window, cx)
-                                }),
-                            )),
-                    ),
-            );
-        #[cfg(target_os = "macos")]
-        let controls = controls.when(!self.mac_dictation_access, |controls| {
-            controls.child(
-                button("打开辅助功能设置", false)
-                    .id("open-mac-accessibility-settings")
-                    .on_click(|_, _, cx| cx.open_url(mac_dictation::ACCESSIBILITY_SETTINGS)),
-            )
-        });
-        let controls = controls.child(
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .child(
-                    home_command("识别模型", "使用本地模型或外部服务。", MUTED)
-                        .border_t_1()
-                        .border_color(rgb(BORDER))
-                        .child(self.model_picker_button(cx)),
-                )
-                .children(self.model_picker_panel(cx))
-                .children(self.tour.mark(Anchor::Model)),
-        );
-
-        let workspace = div()
-            .flex_1()
-            .min_w(px(0.))
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(controls)
-            .child(self.input_status(cx));
-        #[cfg(windows)]
-        let workspace = workspace.when_some(
-            self.recording
-                .as_ref()
-                .and_then(|recording| recording.delivery_issue.as_ref()),
-            |column, issue| column.child(div().text_color(rgb(ERROR)).child(issue.clone())),
-        );
-        let workspace = workspace
-            .child(
-                card()
-                    .relative()
-                    .min_h(px(116.))
-                    .children(self.tour.mark(Anchor::Transcript))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .items_center()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(if recording && !show_preview {
-                                "录音中"
-                            } else if self.transcribing {
-                                "转写中…"
-                            } else if show_preview {
-                                "实时转写"
-                            } else if saved_recording.is_some()
-                                && !self.finalizing_preview.is_empty()
-                            {
-                                "录音已保存 · 临时转写"
-                            } else if saved_recording.is_some() {
-                                "录音已保存"
-                            } else {
-                                "最近转写"
-                            })
-                            .when_some(
-                                saved_recording.filter(|_| !self.recognition_model_busy()),
-                                |row, draft| {
-                                    let draft = draft.clone();
-                                    row.child(
-                                        button("转写", false).id("transcribe-saved").on_click(
-                                            cx.listener(move |view, _, _, cx| {
-                                                view.transcribe(
-                                                    draft.clone(),
-                                                    RecordingDestination::Archive,
-                                                    cx,
-                                                )
-                                            }),
-                                        ),
-                                    )
-                                },
-                            )
-                            .when(
-                                !recording
-                                    && !self.transcribing
-                                    && self.saved_recording.is_none()
-                                    && self.result.is_some(),
-                                |row| {
-                                    let mut buttons = div().flex().items_center().gap_2();
-                                    if let Some((target, text)) = &self.result {
-                                        buttons = buttons.children(self.correction_button(
-                                            "edit-recent",
-                                            target.clone(),
-                                            text,
-                                            cx,
-                                        ));
-                                    }
-                                    row.child(buttons.child(
-                                        icon_button(Icon::Copy, "复制文本").on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|view, _, _, cx| view.copy_recent_text(cx)),
-                                        ),
-                                    ))
-                                },
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("transcript")
-                            .mt_2()
-                            .text_size(px(15.))
-                            .line_height(px(25.))
-                            .max_h(px(174.))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.transcript_scroll)
-                            .when(
-                                if recording || self.transcribing {
-                                    self.recording
-                                        .as_ref()
-                                        .is_some_and(|r| r.preview.text.is_empty())
-                                } else {
-                                    result_text.is_empty()
-                                },
-                                |text| text.text_color(rgb(MUTED)),
-                            )
-                            .child(if recording {
-                                preview.unwrap_or_default().to_owned()
-                            } else if self.transcribing || saved_recording.is_some() {
-                                self.finalizing_preview.clone()
-                            } else if result_text.is_empty() {
-                                "转写结果会显示在这里。".into()
-                            } else {
-                                result_text.to_owned()
-                            }),
-                    ),
-            )
-            .child(self.home_links(cx));
-        let summary = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .when(wide, |column| column.w(px(204.)).flex_none())
-            .child(
-                card()
-                    .flex()
-                    .flex_col()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("录音概览"))
-                    .child(metric("转写字符", characters.to_string()))
-                    .child(metric("录音条数", self.archive.len().to_string()))
-                    .child(metric(
-                        "录音总时长",
-                        format!("{}:{:02}", seconds / 60, seconds % 60),
-                    )),
-            )
-            .child(self.activity());
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_1()
-                    .child(page_heading(
-                        "听写工作台",
-                        "录下语音、查看转写，也能把文字写入其他应用。",
-                    ))
-                    .children(self.tour.mark(Anchor::Workspace))
-                    .when(wide, |header| header.child(self.header_wave.clone())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .when(!wide, |layout| layout.flex_col())
-                    .child(workspace)
-                    .child(summary),
-            )
-    }
-
-    fn home_links(&self, cx: &mut Context<Self>) -> Div {
-        let links = [
-            (
-                Page::History,
-                Icon::History,
-                "录音历史",
-                "回听录音，整理和复制文稿。",
-            ),
-            (
-                Page::Terms,
-                Icon::Terms,
-                "个人词库",
-                "补充人名、项目名和常用写法。",
-            ),
-            #[cfg(windows)]
-            (
-                Page::Benchmark,
-                Icon::Benchmark,
-                "模型评测",
-                "用测试样本比较识别效果。",
-            ),
-            (
-                Page::Settings,
-                Icon::Settings,
-                "听写设置",
-                "调整麦克风、识别服务和语音整理。",
-            ),
-        ];
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("常用入口"));
-        for (index, row) in links.chunks(2).enumerate() {
-            section = section.child(div().flex().gap_3().children(row.iter().enumerate().map(
-                |(offset, &(page, icon, title, detail))| {
-                    card()
-                        .id(("home-link", index * 2 + offset))
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .cursor_pointer()
-                        .hover(|tile| tile.bg(rgb(SIDEBAR)).border_color(rgb(ACCENT)))
-                        .when(self.studio_controls_active(), |tile| {
-                            tile.focusable()
-                                .tab_stop(true)
-                                .focus(|tile| tile.border_color(rgb(ACCENT)))
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(icon.render(ACCENT))
-                                .child(title),
-                        )
-                        .child(settings::detail(detail))
-                        .on_click(cx.listener(move |view, _, _, cx| view.open_page(page, cx)))
-                },
-            )));
-        }
-        section
-    }
-
-    fn history_page(&self, cx: &mut Context<Self>) -> Div {
-        let older_text = history::standalone(&self.archive);
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(page_heading(
-                        "录音历史",
-                        "回听原音、编辑转写，或用其他模型重新识别。",
-                    ))
-                    .child(self.model_picker_button(cx)),
-            )
-            .children(self.model_picker_panel(cx))
-            .when(self.transcribing, |body| {
-                body.child(div().text_color(rgb(MUTED)).child("正在转写…"))
-            })
-            .when(self.archive.is_empty() && older_text.is_empty(), |body| {
-                body.child(
-                    card()
-                        .relative()
-                        .children(self.tour.mark(Anchor::History))
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            div()
-                                .size(px(40.))
-                                .flex_none()
-                                .rounded(px(9.))
-                                .bg(rgb(SIDEBAR))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(Icon::History.render(ACCENT)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child("暂无录音"))
-                                .child(settings::detail(
-                                    "录音结束后，可在这里回听原声和查看转写。",
-                                )),
-                        )
-                        .child(button("前往听写", false).id("history-empty-home").on_click(
-                            cx.listener(|view, _, _, cx| view.open_page(Page::Home, cx)),
-                        )),
-                )
-            })
-            .when(!self.archive.is_empty() || !older_text.is_empty(), |body| {
-                body.child(
-                    div()
-                        .overflow_hidden()
-                        .rounded(px(11.))
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(SURFACE))
-                        .children(self.archive.iter().enumerate().map(|(index, entry)| {
-                            let play = entry.path.clone();
-                            let retry = entry.path.clone();
-                            let resume = entry.path.clone();
-                            let reveal = entry.path.clone();
-                            let organize = entry.path.clone();
-                            let (label, text, pending_action) = match &entry.state {
-                                drafts::State::Draft => ("未转写", None, "转写"),
-                                drafts::State::Cancelled => ("转写已取消", None, "重试"),
-                                drafts::State::Transcribed { text } => ("", Some(text.clone()), ""),
-                            };
-                            let date = entry
-                                .modified
-                                .and_then(|time| time.elapsed().ok())
-                                .map(|elapsed| match elapsed.as_secs() {
-                                    0..=59 => "刚刚".to_owned(),
-                                    60..=3599 => format!("{} 分钟前", elapsed.as_secs() / 60),
-                                    3600..=86399 => format!("{} 小时前", elapsed.as_secs() / 3600),
-                                    _ => format!("{} 天前", elapsed.as_secs() / 86400),
-                                })
-                                .unwrap_or_default();
-                            history_row()
-                                .id(("recording", index))
-                                .when(index == 0, |row| {
-                                    row.relative().children(self.tour.mark(Anchor::History))
-                                })
-                                .child(history_meta(format!(
-                                    "{date}\n{}:{:02}",
-                                    entry.duration_seconds / 60,
-                                    entry.duration_seconds % 60
-                                )))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .pt(px(4.))
-                                        .when(text.is_none(), |body| body.text_color(rgb(MUTED)))
-                                        .child(text.clone().unwrap_or_else(|| label.into()))
-                                        .when_some(entry.recognizer.clone(), |body, recognizer| {
-                                            body.child(settings::detail(recognizer))
-                                        })
-                                        .when_some(text.as_deref(), |body, source| {
-                                            body.child(self.organized_result(entry, source, cx))
-                                        })
-                                        .child(self.rewrite_debug(&entry.path, cx))
-                                        .children(entry.comparisons.iter().map(|comparison| {
-                                            div()
-                                                .mt_1()
-                                                .p_2()
-                                                .rounded_md()
-                                                .bg(rgb(SIDEBAR))
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .child(settings::detail(comparison.model.clone()))
-                                                .child(comparison.text.clone())
-                                        })),
-                                )
-                                .when_some(text.as_deref(), |row, source| {
-                                    row.children(self.correction_button(
-                                        ("edit-recording", index),
-                                        history::Target::Draft(entry.path.clone()),
-                                        source,
-                                        cx,
-                                    ))
-                                })
-                                .when(!self.recognition_model_busy(), |row| {
-                                    let compare = entry.path.clone();
-                                    row.child(
-                                        button("测试模型", false)
-                                            .id(("compare-recording", index))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |view, _, _, cx| {
-                                                    view.compare_recording(compare.clone(), cx);
-                                                }),
-                                            ),
-                                    )
-                                })
-                                .child(
-                                    history_actions()
-                                        .child(icon_button(Icon::Play, "播放录音").on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |view, _, _, cx| {
-                                                if view.recording.is_none()
-                                                    && view.unsaved.is_none()
-                                                {
-                                                    view.stop_playback();
-                                                    match playback::Playback::start(&play) {
-                                                        Ok(playback) => {
-                                                            view.playback = Some(playback);
-                                                            view.status.clear();
-                                                        }
-                                                        Err(error) => {
-                                                            view.status =
-                                                                format!("播放失败：{error}")
-                                                        }
-                                                    }
-                                                    cx.notify();
-                                                }
-                                            }),
-                                        ))
-                                        .when(!self.recognition_model_busy(), |actions| {
-                                            actions.child(
-                                                if text.is_some() {
-                                                    icon_button(Icon::Retry, "重新转写")
-                                                } else {
-                                                    button(pending_action, false)
-                                                        .id(("transcribe-recording", index))
-                                                }
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |view, _, _, cx| {
-                                                        view.transcribe(
-                                                            retry.clone(),
-                                                            RecordingDestination::Archive,
-                                                            cx,
-                                                        );
-                                                    }),
-                                                ),
-                                            )
-                                        })
-                                        .when(
-                                            !self.recognition_model_busy()
-                                                && !matches!(
-                                                    entry.state,
-                                                    drafts::State::Transcribed { .. }
-                                                ),
-                                            |row| {
-                                                row.child(button("继续录音", false).on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |view, _, _, cx| {
-                                                        view.begin_recording(
-                                                            resume.clone(),
-                                                            RecordingStart::Resume,
-                                                            cx,
-                                                        );
-                                                    }),
-                                                ))
-                                            },
-                                        )
-                                        .child(
-                                            icon_button(Icon::Folder, "在访达中显示录音")
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |_, _, _, cx| {
-                                                        cx.reveal_path(&reveal)
-                                                    }),
-                                                ),
-                                        )
-                                        .when_some(text, |row, text| {
-                                            let original = text.clone();
-                                            row.child(
-                                                icon_button(Icon::Copy, "复制文本").on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |_, _, _, cx| {
-                                                        cx.write_to_clipboard(
-                                                            ClipboardItem::new_string(text.clone()),
-                                                        );
-                                                    }),
-                                                ),
-                                            )
-                                            .when(
-                                                self.organizer_enabled,
-                                                |row| {
-                                                    row.child(
-                                                        button("整理", false)
-                                                            .id(("organize-transcript", index))
-                                                            .on_click(cx.listener(
-                                                                move |view, _, _, cx| {
-                                                                    view.organize_transcript(
-                                                                        organize.clone(),
-                                                                        original.clone(),
-                                                                        cx,
-                                                                    );
-                                                                },
-                                                            )),
-                                                    )
-                                                },
-                                            )
-                                        }),
-                                )
-                        }))
-                        .children(older_text.into_iter().enumerate().map(
-                            |(index, (target, text))| {
-                                history_row()
-                                    .id(("previous-transcript", index))
-                                    .when(index == 0 && self.archive.is_empty(), |row| {
-                                        row.relative().children(self.tour.mark(Anchor::History))
-                                    })
-                                    .child(history_meta("过往转写".into()))
-                                    .child(
-                                        div().flex_1().min_w(px(0.)).pt(px(4.)).child(text.clone()),
-                                    )
-                                    .children(self.correction_button(
-                                        ("edit-previous", index),
-                                        target,
-                                        &text,
-                                        cx,
-                                    ))
-                                    .child(
-                                        history_actions()
-                                            .invisible()
-                                            .group_hover("history-row", |style| style.visible())
-                                            .child(
-                                                icon_button(Icon::Copy, "复制文本").on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |_, _, _, cx| {
-                                                        cx.write_to_clipboard(
-                                                            ClipboardItem::new_string(text.clone()),
-                                                        );
-                                                    }),
-                                                ),
-                                            ),
-                                    )
-                            },
-                        )),
-                )
-            })
-    }
-
-    #[cfg(any(target_os = "macos", windows))]
     fn edit_terms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.correction.busy {
+            return;
+        }
         let editor = self
             .invalid_terms
             .clone()
@@ -1862,7 +1262,7 @@ impl Speaky {
                         Err(_) => (None, Err("编辑窗口已关闭。".into())),
                     };
                     let _ = view.update(cx, |view, cx| {
-                        view.status = match result {
+                        let message = match result {
                             Ok(()) => {
                                 view.invalid_terms = None;
                                 String::new()
@@ -1874,145 +1274,117 @@ impl Speaky {
                                 format!("保存失败：{error}")
                             }
                         };
+                        view.set_feedback(Page::Terms, message);
                         cx.notify();
                     });
                 })
                 .detach(),
             Err(error) => {
-                self.status = format!("无法打开常用词编辑器：{error}");
+                self.set_feedback(Page::Terms, format!("无法打开常用词编辑器：{error}"));
                 cx.notify();
             }
         }
     }
 
-    fn terms_page(&self, wide: bool, cx: &mut Context<Self>) -> Div {
-        let display = terms::load();
-        let actions = div()
-            .flex()
-            .gap_2()
-            .when(cfg!(any(target_os = "macos", windows)), |row| {
-                row.child(button("编辑词表", true).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_view, _, _window, _cx| {
-                        #[cfg(any(target_os = "macos", windows))]
-                        _view.edit_terms(_window, _cx);
-                    }),
-                ))
-            })
-            .child(button("粘贴并保存", false).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    if let Some(source) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        view.status = match terms::save(&source) {
-                            Ok(()) => String::new(),
-                            Err(error) => format!("保存失败：{error}"),
-                        };
-                        cx.notify();
-                    }
-                }),
-            ))
-            .child(icon_button(Icon::Copy, "复制词表").on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
-                    if let Ok(source) = terms::load() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(source));
-                    }
-                }),
-            ));
-        let manual = card()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("手动添加"))
-            .child(match display {
-                Ok(text) if text.is_empty() => {
-                    div().text_color(rgb(MUTED)).child("暂无手动添加的词。")
-                }
-                Ok(text) => div().child(text),
-                Err(error) => div()
-                    .text_color(rgb(ERROR))
-                    .child(format!("无法读取手动词表：{error}")),
-            });
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(page_heading(
-                "个人词库",
-                "管理专有词，以及从改错词中学到的写法。",
-            ))
-            .child(actions)
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .when(!wide, |panel| panel.flex_col())
-                    .child(div().flex_1().min_w(px(0.)).child(manual))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .child(self.learned_terms_card(cx)),
-                    ),
+    fn page_footer(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let show_playback = self.playback.is_some();
+        #[cfg(windows)]
+        let show_playback = show_playback && !self.benchmark.playing;
+        let (message, color) = if let Some((_, error)) = &self.unsaved {
+            (
+                Some(format!("录音尚未保存，音频仍在内存。{error}")),
+                ERROR(),
             )
+        } else if matches!(self.page, Page::Settings | Page::Models) {
+            match self.settings_notice() {
+                Some(Ok(message)) => (Some(message.clone()), MUTED()),
+                Some(Err(message)) => (Some(message.clone()), ERROR()),
+                None => (self.feedback_for(self.page).map(str::to_owned), MUTED()),
+            }
+        } else {
+            (self.feedback_for(self.page).map(str::to_owned), MUTED())
+        };
+        if message.is_none() && !show_playback {
+            return None;
+        }
+        let correction_action = self
+            .feedback_for(self.page)
+            .filter(|text| message.as_deref() == Some(*text))
+            .and_then(|text| self.correction_notice_action(text, cx));
+        Some(
+            div()
+                .relative()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_2()
+                .mx_5()
+                .py_2()
+                .border_t_1()
+                .border_color(rgb(BORDER()))
+                .text_size(px(12.))
+                .text_color(rgb(color))
+                .children(self.tour.mark(Anchor::Status))
+                .child(div().flex_1().min_w(px(0.)).children(message))
+                .children(correction_action)
+                .when(show_playback, |row| {
+                    row.child(
+                        button("停止播放", false)
+                            .id("stop-playback")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.stop_playback();
+                                cx.notify();
+                            })),
+                    )
+                })
+                .when(self.unsaved.is_some(), |row| {
+                    row.child(button("重试保存", true).id("retry-save-audio").on_click(
+                        cx.listener(|view, _, _, cx| {
+                            if let Some((pending, _)) = view.unsaved.take() {
+                                view.persist(pending, cx);
+                                cx.notify();
+                            }
+                        }),
+                    ))
+                }),
+        )
     }
 }
 
 impl Render for Speaky {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.prepare_tour(window, cx);
+        let tour_docked = self.prepare_tour(window);
         let viewport = window.viewport_size();
         let wide = viewport.width >= px(860.);
-        let tour_docked = self.tour.docked(viewport);
-        let (status, status_color) = match (self.page, self.settings_notice()) {
-            _ if self.unsaved.is_some() => (self.status.as_str(), ERROR),
-            (Page::Settings, Some(Ok(message))) => (message.as_str(), ACCENT),
-            (Page::Settings, Some(Err(message))) => (message.as_str(), ERROR),
-            _ if self.status.is_empty()
-                && self.global_hotkey.is_none()
-                && self.page == Page::Home =>
-            {
-                (self.hotkey_status.as_str(), MUTED)
-            }
-            _ => (self.status.as_str(), MUTED),
-        };
-        let (status, status_color) = self
-            .model_picker
-            .switching_notice()
-            .map(|notice| (notice, ACCENT))
-            .or_else(|| {
-                if status.is_empty() && self.model_picker.preloading {
-                    self.model_picker
-                        .preload_notice()
-                        .map(|notice| (notice, MUTED))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or((status, status_color));
-        let show_playback = self.playback.is_some();
-        #[cfg(windows)]
-        let show_playback = show_playback && !self.benchmark.playing;
+        let footer = self.page_footer(cx);
         div()
             .size_full()
             .relative()
             .flex()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(INK))
+            .bg(rgb(BACKGROUND()))
+            .text_color(rgb(INK()))
             .text_size(px(13.))
             .line_height(px(19.))
             .child(
                 div()
-                    .w(px(164.))
+                    .w(if viewport.width >= px(970.) {
+                        px(214.)
+                    } else {
+                        px(156.)
+                    })
                     .flex_none()
                     .flex()
                     .flex_col()
                     .gap_1()
                     .px_3()
                     .pb_3()
-                    .border_r_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(RAIL))
+                    .ml_3()
+                    .mt_3()
+                    .mb_3()
+                    .rounded(px(13.))
+                    .border_1()
+                    .border_color(rgb(BORDER()))
+                    .bg(rgb(RAIL()))
                     .child(
                         div()
                             .h(px(74.))
@@ -2023,18 +1395,25 @@ impl Render for Speaky {
                             .text_size(px(19.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(studio_ui::mark())
-                            .child("Speaky")
+                            .child(
+                                div().flex().flex_col().child("Speaky").child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(MUTED()))
+                                        .child(concat!("领铄 · ", env!("CARGO_PKG_VERSION"))),
+                                ),
+                            )
                             .on_mouse_down(MouseButton::Left, |_, window, _| {
                                 window.start_window_move();
                             }),
                     )
                     .children(
                         [
-                            (Page::Home, "工作台", Icon::Home),
-                            (Page::History, "录音历史", Icon::History),
-                            (Page::Terms, "词库", Icon::Terms),
-                            #[cfg(windows)]
-                            (Page::Benchmark, "模型评测", Icon::Benchmark),
+                            (Page::Home, "首页", Icon::Home),
+                            (Page::Models, "模型选择", Icon::Model),
+                            (Page::Files, "转录文件", Icon::Folder),
+                            (Page::History, "历史记录", Icon::History),
+                            (Page::Terms, "词典", Icon::Terms),
                         ]
                         .map(|(page, label, icon)| self.nav_item(page, label, icon, cx)),
                     )
@@ -2049,7 +1428,7 @@ impl Render for Speaky {
                             .pt_2()
                             .flex_col()
                             .border_t_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(BORDER()))
                             .child(self.tour_entry(cx).px_1())
                             .child(self.settings_control(cx)),
                     ),
@@ -2063,7 +1442,10 @@ impl Render for Speaky {
                     .min_w(px(0.))
                     .when(cfg!(windows), |column| {
                         #[cfg(windows)]
-                        let column = column.child(window_chrome::header(window.is_maximized()));
+                        let column = column.child(window_chrome::header(
+                            window.is_maximized(),
+                            self.theme_switch(true, cx),
+                        ));
                         column
                     })
                     .when(!cfg!(windows), |column| {
@@ -2076,49 +1458,6 @@ impl Render for Speaky {
                                 }),
                         )
                     })
-                    .when(
-                        !status.is_empty() || self.unsaved.is_some() || show_playback,
-                        |page| {
-                            page.child(
-                                div()
-                                    .relative()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .mx_5()
-                                    .mb_2()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded(px(7.))
-                                    .bg(rgb(SURFACE))
-                                    .text_size(px(12.))
-                                    .text_color(rgb(status_color))
-                                    .children(self.tour.mark(Anchor::Status))
-                                    .child(div().flex_1().min_w(px(0.)).child(status.to_owned()))
-                                    .when(show_playback, |row| {
-                                        row.child(button("停止播放", false).on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|view, _, _, cx| {
-                                                view.stop_playback();
-                                                cx.notify();
-                                            }),
-                                        ))
-                                    })
-                                    .when(self.unsaved.is_some(), |row| {
-                                        row.child(button("重试保存", true).on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|view, _, _, cx| {
-                                                if let Some(pending) = view.unsaved.take() {
-                                                    view.persist(pending, cx);
-                                                    cx.notify();
-                                                }
-                                            }),
-                                        ))
-                                    }),
-                            )
-                        },
-                    )
                     .child(
                         div()
                             .id(self.page as usize)
@@ -2126,6 +1465,10 @@ impl Render for Speaky {
                             .min_h(px(0.))
                             .min_w(px(0.))
                             .overflow_y_scroll()
+                            .when(
+                                self.page == Page::History && !self.tour.is_active(),
+                                |scroll| scroll.track_scroll(&self.redesign_library.scroll),
+                            )
                             .when_some(self.tour.track_page(), |scroll, handle| {
                                 scroll.track_scroll(handle)
                             })
@@ -2133,14 +1476,17 @@ impl Render for Speaky {
                             .pt_2()
                             .pb_5()
                             .child(match self.page {
-                                Page::Home => self.home(wide, cx),
-                                Page::History => self.history_page(cx),
+                                Page::Home => self.v30_home(viewport.width >= px(970.), cx),
+                                Page::Models => self.v30_models(window, cx),
+                                Page::Files => self.v30_files(cx),
+                                Page::History => self.v30_history(cx),
                                 #[cfg(windows)]
                                 Page::Benchmark => self.benchmark_page(cx),
-                                Page::Terms => self.terms_page(wide, cx),
-                                Page::Settings => self.settings_page(cx),
+                                Page::Terms => self.v30_terms(wide, cx),
+                                Page::Settings => self.v30_settings(cx),
                             }),
                     )
+                    .children(footer)
                     .when(tour_docked, |column| {
                         column.children(self.tour_dock(viewport, cx))
                     }),
@@ -2154,13 +1500,17 @@ impl Render for Speaky {
                             view.finish_tour(window, cx);
                         }
                     }))
-                    .children(self.tour_overlay(tour_docked, cx))
+                    .children(self.tour_overlay(viewport, tour_docked, cx))
             })
     }
 }
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        let configured_theme = config::Config::load()
+            .map(|config| config.appearance.theme)
+            .unwrap_or_else(|_| "auto".into());
+        theme::set(theme::resolve(&configured_theme, cx.window_appearance()));
         #[cfg(windows)]
         let display_id = std::env::var_os("SPEAKY_START_ON_SECONDARY")
             .filter(|value| value == "1")
@@ -2173,13 +1523,21 @@ fn main() {
             });
         #[cfg(not(windows))]
         let display_id = None;
-        let bounds = Bounds::centered(display_id, size(px(1030.), px(690.)), cx);
+        let window_size = size(px(1120.), px(740.));
+        #[cfg(target_vendor = "win7")]
+        let window_size = {
+            let display = Bounds::maximized(display_id, cx).size;
+            let viewport = size(display.width - px(24.), display.height - px(56.));
+            window_size.min(&viewport.max(&size(px(665.), px(435.))))
+        };
+        let bounds = Bounds::centered(display_id, window_size, cx);
         let window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(665.), px(435.))),
                     display_id,
+                    focus: display_id.is_none(),
                     window_background: if cfg!(windows) {
                         WindowBackgroundAppearance::Opaque
                     } else {
@@ -2204,7 +1562,9 @@ fn main() {
                         let startup_config = config::Config::load();
                         #[cfg(windows)]
                         let release_gpu = startup_config.as_ref().ok().is_some_and(|c| {
-                            c.engine.current == "remote" || config::Framework::selected(c).is_some()
+                            !engines::uses_gemini_asr(c)
+                                && (c.engine.current == "remote"
+                                    || config::Framework::selected(c).is_some())
                         }) && local_models::has_owned_manager();
                         let shortcut = startup_config
                             .as_ref()
@@ -2232,6 +1592,9 @@ fn main() {
                                         }
                                     }
                                     view.checkpoint(cx);
+                                    if matches!(view.page, Page::Home | Page::Settings) {
+                                        view.refresh_input_devices(cx);
+                                    }
                                 })
                                 .is_err()
                             {
@@ -2245,6 +1608,7 @@ fn main() {
                             if entity
                                 .update(cx, |view, cx| {
                                     view.poll_preview(cx);
+                                    view.v30_tick(cx);
                                     if view.diagnostics.checking {
                                         cx.notify();
                                     }
@@ -2273,7 +1637,10 @@ fn main() {
                                             Ok(false) => {}
                                             result => {
                                                 if let Err(error) = result {
-                                                    view.status = format!("播放失败：{error}");
+                                                    view.set_feedback(
+                                                        view.page,
+                                                        format!("播放失败：{error}"),
+                                                    );
                                                 }
                                                 view.stop_playback();
                                                 cx.notify();
@@ -2288,12 +1655,13 @@ fn main() {
                         })
                         .detach();
                         let mut view = Speaky::new(hotkey, hotkey_status, cx);
+                        view.refresh_input_devices(cx);
                         view.show_first_tour(window, cx);
                         #[cfg(any(target_os = "macos", windows))]
                         view.resolve_framework_name(cx);
                         #[cfg(windows)]
                         if release_gpu {
-                            view.release_local_model(cx);
+                            view.release_local_model(None, cx);
                         }
                         if let Ok(config) = startup_config {
                             view.preload_selected_model(config, cx);
@@ -2306,7 +1674,7 @@ fn main() {
         cx.on_app_quit(move |cx| {
             let _ = window.update(cx, |view, _, cx| {
                 view.save_before_exit(cx);
-                if let Some(pending) = view.unsaved.take() {
+                if let Some((pending, _)) = view.unsaved.take() {
                     view.persist(pending, cx);
                 }
                 view.stop_playback();
@@ -2338,7 +1706,7 @@ fn main() {
                     return false;
                 }
                 if view.starting || view.transcribing || view.correction.busy {
-                    view.status = "正在保存转写结果，完成后即可退出。".into();
+                    view.set_feedback(view.page, "正在保存转写结果，完成后即可退出。");
                     cx.notify();
                     return false;
                 }
@@ -2367,7 +1735,9 @@ fn main() {
                 MenuItem::action("退出 Speaky", Quit),
             ],
         }]);
-        cx.activate(true);
+        if display_id.is_none() {
+            cx.activate(true);
+        }
         #[cfg(target_os = "macos")]
         cx.defer(|_| mac_dictation::request_access());
         #[cfg(windows)]
@@ -2378,7 +1748,7 @@ fn main() {
                 .desktop
                 .windows_floating_button;
             if let Err(error) = view.set_floating_button_enabled(enabled, cx) {
-                view.status = format!("桌面悬浮按钮未能打开：{error}");
+                view.set_feedback(Page::Settings, format!("桌面悬浮按钮未能打开：{error}"));
                 cx.notify();
             }
         });

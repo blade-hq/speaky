@@ -36,6 +36,36 @@ struct Focus {
 }
 
 impl Focus {
+    fn is_wechat(self) -> bool {
+        self.is_process(&["weixin.exe", "wechat.exe"])
+    }
+
+    fn is_process(self, names: &[&str]) -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, self.process);
+            if handle.is_null() {
+                return false;
+            }
+            let mut path = [0u16; 1024];
+            let mut length = path.len() as u32;
+            let ok = QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut length);
+            CloseHandle(handle);
+            if ok == 0 {
+                return false;
+            }
+            let path = String::from_utf16_lossy(&path[..length as usize]);
+            path.rsplit('\\').next().is_some_and(|name| {
+                names
+                    .iter()
+                    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            })
+        }
+    }
+
     fn current() -> Option<Self> {
         foreground_focus().1
     }
@@ -73,14 +103,22 @@ impl Focus {
     }
 
     fn is_native_edit(self) -> bool {
-        let mut name = [0; 128];
-        let len =
-            unsafe { GetClassNameW(self.control as HWND, name.as_mut_ptr(), name.len() as i32) };
-        let class = String::from_utf16_lossy(&name[..len as usize]).to_ascii_lowercase();
+        let class = self.control_class();
         matches!(
             class.as_str(),
             "edit" | "richedit" | "richedit20w" | "richedit50w" | "richedit60w" | "richeditd2dpt"
         )
+    }
+
+    fn is_opaque_wechat_window(self) -> bool {
+        self.control == self.foreground && self.control_class() == "qt51514qwindowicon"
+    }
+
+    fn control_class(self) -> String {
+        let mut name = [0; 128];
+        let len =
+            unsafe { GetClassNameW(self.control as HWND, name.as_mut_ptr(), name.len() as i32) };
+        String::from_utf16_lossy(&name[..len as usize]).to_ascii_lowercase()
     }
 
     fn message(self, message: u32, wparam: usize, lparam: isize) -> Result<usize, String> {
@@ -137,6 +175,7 @@ enum EditRequest {
     },
     Final {
         text: String,
+        revision: bool,
         deadline: Instant,
         reply: mpsc::SyncSender<FinalDelivery>,
     },
@@ -150,6 +189,7 @@ enum FinalDelivery {
 #[derive(Clone)]
 pub struct DictationTarget {
     focus: Focus,
+    wechat: bool,
     writer: mpsc::Sender<EditRequest>,
     sequence: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
@@ -166,6 +206,10 @@ pub struct StopFocus(Option<Focus>);
 impl StopFocus {
     pub fn capture() -> Self {
         Self(foreground_focus().1)
+    }
+
+    pub fn is_wechat(self) -> bool {
+        self.0.is_some_and(Focus::is_wechat)
     }
 }
 
@@ -184,6 +228,9 @@ impl DictationTarget {
     }
 
     fn capture_field(focus: Focus) -> Option<Self> {
+        let is_wechat = focus.is_wechat();
+        let opaque = is_wechat && focus.is_opaque_wechat_window();
+        let guard = opaque.then(|| interaction::Guard::snapshot(focus));
         let (writer, incoming) = mpsc::channel::<EditRequest>();
         let sequence = Arc::new(AtomicU64::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
@@ -196,7 +243,7 @@ impl DictationTarget {
             .spawn(move || {
                 // UIA ranges and their original focused element belong to this worker's MTA.
                 let native = focus.is_native_edit();
-                let _apartment = if native {
+                let _apartment = if native || opaque {
                     None
                 } else {
                     let Ok(com) = ComApartment::enter() else {
@@ -205,23 +252,40 @@ impl DictationTarget {
                     };
                     Some(com)
                 };
-                let automation = if native {
-                    if !focus.writable_native() {
-                        *worker_issue.lock().unwrap() = Some(NO_EDITOR.into());
-                        return;
-                    }
-                    None
-                } else {
-                    match AutomationEditor::capture(focus) {
-                        Ok(editor) => Some(editor),
+                let mut editor = if let Some(guard) = guard {
+                    // This WeChat window class exposes the outer HWND through
+                    // UIA. A usable clipboard selection is verified by the editor.
+                    match guard
+                        .start_watching()
+                        .and_then(|guard| wechat::Composer::capture(focus, guard))
+                    {
+                        Ok(composer) => Writer::WeChat(composer),
                         Err(error) => {
                             *worker_issue.lock().unwrap() = Some(error);
                             return;
                         }
                     }
+                } else {
+                    let automation = if native {
+                        if !focus.writable_native() {
+                            *worker_issue.lock().unwrap() = Some(NO_EDITOR.into());
+                            return;
+                        }
+                        None
+                    } else {
+                        match AutomationEditor::capture(focus) {
+                            Ok(editor) => Some(editor),
+                            Err(error) => {
+                                *worker_issue.lock().unwrap() = Some(error);
+                                return;
+                            }
+                        }
+                    };
+                    let editor = live::Editor::new(focus, automation);
+                    let composition = live::Composition::capture(&editor);
+                    Writer::Accessible(editor, composition)
                 };
-                let editor = live::Editor::new(focus, automation);
-                let mut composition = live::Composition::capture(&editor);
+                let mut delivered = false;
                 for request in incoming {
                     match request {
                         EditRequest::Freeze { reply } => {
@@ -230,7 +294,7 @@ impl DictationTarget {
                             let _ = reply.send(editor.require_focus());
                         }
                         EditRequest::Cancel { reply } => {
-                            let result = composition.cancel(&editor);
+                            let result = editor.cancel();
                             if let Err(error) = &result {
                                 *worker_issue.lock().unwrap() = Some(error.clone());
                             }
@@ -243,26 +307,32 @@ impl DictationTarget {
                             {
                                 continue;
                             }
-                            if let Err(error) = composition.preview(&editor, &text) {
+                            if let Err(error) = editor.preview(&text) {
                                 *worker_issue.lock().unwrap() = Some(error);
                             }
                         }
                         EditRequest::Final {
                             text,
+                            revision,
                             deadline,
                             reply,
                         } => {
                             let result = match editor.require_focus() {
-                                Ok(()) => FinalDelivery::Finished(
-                                    composition.finish(&editor, &text, deadline),
-                                ),
+                                Ok(()) if revision == delivered => {
+                                    let result = editor.finish(&text, deadline, revision);
+                                    delivered = result.is_ok();
+                                    FinalDelivery::Finished(result)
+                                }
+                                Ok(()) => FinalDelivery::Finished(Err(UNSUPPORTED.into())),
                                 Err(error) if error == FOCUS_CHANGED => {
                                     FinalDelivery::TargetChanged
                                 }
                                 Err(error) => FinalDelivery::Finished(Err(error)),
                             };
                             let _ = reply.send(result);
-                            break;
+                            if revision || !delivered {
+                                break;
+                            }
                         }
                     }
                 }
@@ -270,6 +340,7 @@ impl DictationTarget {
             .ok()?;
         Some(Self {
             focus,
+            wechat: is_wechat,
             writer,
             sequence,
             stopped,
@@ -279,6 +350,10 @@ impl DictationTarget {
 
     pub fn delivery_issue(&self) -> Option<String> {
         self.issue.lock().unwrap().clone()
+    }
+
+    pub fn is_wechat(&self) -> bool {
+        self.wechat
     }
 
     pub fn preview(&self, text: &str) {
@@ -305,6 +380,14 @@ impl DictationTarget {
         let focus = stopped.0;
         if let Some(previous) = previous {
             previous.stop_preview();
+            if previous.wechat {
+                if Some(previous.focus) != focus {
+                    return Err(FOCUS_CHANGED.into());
+                }
+                // The lease and exact draft are checked on the editor worker,
+                // after any pending preview, immediately before delivery.
+                return Ok(previous.clone());
+            }
             let mut capture_error = None;
             if Some(previous.focus) == focus {
                 match previous.freeze_at_stop(previous.focus.is_native_edit()) {
@@ -355,16 +438,24 @@ impl DictationTarget {
     }
 
     pub fn deliver(&self, text: &str) -> Result<(), String> {
+        self.deliver_stage(text, false)
+    }
+
+    pub fn revise(&self, text: &str) -> Result<(), String> {
+        self.deliver_stage(text, true)
+    }
+
+    fn deliver_stage(&self, text: &str, revision: bool) -> Result<(), String> {
         if text.trim().is_empty() || text.contains('\0') {
             return Err("没有可写入的有效文本。".into());
         }
-        match self.insert(text)? {
+        match self.insert(text, revision)? {
             FinalDelivery::Finished(result) => result,
             FinalDelivery::TargetChanged => Err(FOCUS_CHANGED.into()),
         }
     }
 
-    fn insert(&self, text: &str) -> Result<FinalDelivery, String> {
+    fn insert(&self, text: &str, revision: bool) -> Result<FinalDelivery, String> {
         self.stop_preview();
         let (reply, result) = mpsc::sync_channel(1);
         // A preview already writing to the editor must complete before the final replacement.
@@ -372,6 +463,7 @@ impl DictationTarget {
         self.writer
             .send(EditRequest::Final {
                 text: normalized_lines(text),
+                revision,
                 deadline,
                 reply,
             })
@@ -383,6 +475,44 @@ impl DictationTarget {
             self.delivery_issue()
                 .unwrap_or_else(|| UNSUPPORTED.to_owned())
         })
+    }
+}
+
+enum Writer {
+    Accessible(live::Editor, live::Composition),
+    WeChat(wechat::Composer),
+}
+
+impl Writer {
+    fn require_focus(&self) -> Result<(), String> {
+        match self {
+            Self::Accessible(editor, _) => editor.require_focus(),
+            Self::WeChat(composer) => composer.require_focus(),
+        }
+    }
+
+    fn preview(&mut self, text: &str) -> Result<(), String> {
+        match self {
+            Self::Accessible(editor, composition) => composition.preview(editor, text),
+            Self::WeChat(composer) => composer.write(text, Instant::now() + Duration::from_secs(3)),
+        }
+    }
+
+    fn cancel(&mut self) -> Result<(), String> {
+        match self {
+            Self::Accessible(editor, composition) => composition.cancel(editor),
+            Self::WeChat(composer) => composer.cancel(),
+        }
+    }
+
+    fn finish(&mut self, text: &str, deadline: Instant, revision: bool) -> Result<(), String> {
+        match self {
+            Self::Accessible(editor, composition) if revision => {
+                composition.revise(editor, text, deadline)
+            }
+            Self::Accessible(editor, composition) => composition.finish(editor, text, deadline),
+            Self::WeChat(composer) => composer.write(text, deadline),
+        }
     }
 }
 
@@ -746,6 +876,7 @@ fn virtual_key(vk: u16, flags: u32) -> INPUT {
             ki: KEYBDINPUT {
                 wVk: vk,
                 dwFlags: flags,
+                dwExtraInfo: interaction::INPUT_MARKER,
                 ..Default::default()
             },
         },
@@ -793,6 +924,9 @@ fn unicode_packets(text: &str) -> Result<Vec<INPUT>, String> {
 mod live;
 
 mod clipboard;
+mod interaction;
+mod wechat;
+mod wechat_clipboard;
 
 #[cfg(test)]
 mod tests {
@@ -806,6 +940,7 @@ mod tests {
                 process: 0,
                 thread: 0,
             },
+            wechat: false,
             writer,
             sequence: Arc::new(AtomicU64::new(0)),
             stopped: Arc::new(AtomicBool::new(false)),

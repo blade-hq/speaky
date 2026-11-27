@@ -12,6 +12,39 @@ struct Selection {
     after: String,
 }
 
+// Feishu's editor-kit provider appends three zero-width text nodes to the
+// accessible draft. It also exposes the empty-draft label as its own line.
+const FEISHU_TRAILER: &str = "\u{200b}\n\u{200b}\n\u{200b}";
+const FEISHU_EMPTY_TAIL: &str = "\n\u{200b}\n\u{200b}";
+
+fn feishu_placeholder_label(selection: &Selection) -> Option<&str> {
+    if !selection.selected.is_empty() || selection.after != FEISHU_EMPTY_TAIL {
+        return None;
+    }
+    let label = selection.before.strip_suffix("\n\u{200b}")?;
+    let recipient = label
+        .strip_prefix("发送给 ")
+        .or_else(|| label.strip_prefix("Send to "))?;
+    (!recipient.trim().is_empty()
+        && !recipient.contains(|c: char| c.is_control() || c == '\u{200b}'))
+    .then_some(label)
+}
+
+fn normalize_feishu(selection: &mut Selection, verify_placeholder: impl FnOnce(&str) -> bool) {
+    if let Some(label) = feishu_placeholder_label(selection) {
+        if verify_placeholder(label) {
+            selection.before.clear();
+            selection.after.clear();
+        }
+    } else if selection.after.ends_with(FEISHU_TRAILER) {
+        // Preserve every other character, including a user's real newline or
+        // zero-width character, and never normalize the selected span.
+        selection
+            .after
+            .truncate(selection.after.len() - FEISHU_TRAILER.len());
+    }
+}
+
 impl Selection {
     fn after_writing(&self, text: &str) -> Self {
         Self {
@@ -49,11 +82,26 @@ fn revision<'a>(old: &'a str, new: &'a str) -> (&'a str, &'a str, &'a str) {
 pub(super) struct Editor {
     focus: Focus,
     automation: Option<AutomationEditor>,
+    feishu_composer: bool,
 }
 
 impl Editor {
     pub(super) fn new(focus: Focus, automation: Option<AutomationEditor>) -> Self {
-        Self { focus, automation }
+        let feishu_composer = automation.as_ref().is_some_and(|editor| {
+            focus.is_process(&["feishu.exe", "lark.exe"])
+                && editor.is_chromium()
+                && unsafe { editor.field.CurrentClassName() }.is_ok_and(|class| {
+                    let class = class.to_string();
+                    ["zone-container", "editor-kit-container", "innerdocbody"]
+                        .iter()
+                        .all(|token| class.split_ascii_whitespace().any(|part| part == *token))
+                })
+        });
+        Self {
+            focus,
+            automation,
+            feishu_composer,
+        }
     }
 
     pub(super) fn require_focus(&self) -> Result<(), String> {
@@ -103,7 +151,11 @@ impl Editor {
                     selected: contents(readable(range.GetText(-1))?)?,
                     after: contents(readable(after.GetText(-1))?)?,
                 };
-                if editor.displays_placeholder(
+                if self.feishu_composer {
+                    normalize_feishu(&mut selection, |label| {
+                        feishu_placeholder_node(editor, &pattern, label).unwrap_or(false)
+                    });
+                } else if editor.displays_placeholder(
                     &[&*selection.before, &*selection.selected, &*selection.after].concat(),
                 ) {
                     selection.before.clear();
@@ -293,6 +345,39 @@ impl Editor {
         self.focus
             .message(EM_REPLACESEL, 1, wide.as_ptr() as isize)?;
         Ok(())
+    }
+}
+
+fn feishu_placeholder_node(
+    editor: &AutomationEditor,
+    pattern: &IUIAutomationTextPattern,
+    label: &str,
+) -> Option<bool> {
+    unsafe {
+        let walker = editor.client.RawViewWalker().ok()?;
+        let group = walker.GetFirstChildElement(&editor.field).ok()?;
+        if group.CurrentControlType().ok()? != UIA_GroupControlTypeId
+            || walker.GetNextSiblingElement(&group).is_ok()
+        {
+            return Some(false);
+        }
+        let mut child = walker.GetFirstChildElement(&group).ok()?;
+        for (index, expected) in [label, "\u{200b}", "\u{200b}", "\u{200b}"]
+            .iter()
+            .enumerate()
+        {
+            if index > 0 {
+                child = walker.GetNextSiblingElement(&child).ok()?;
+            }
+            if child.CurrentControlType().ok()? != UIA_TextControlTypeId
+                || child.CurrentName().ok()?.to_string() != *expected
+                || contents(pattern.RangeFromChild(&child).ok()?.GetText(-1).ok()?).ok()?
+                    != *expected
+            {
+                return Some(false);
+            }
+        }
+        Some(walker.GetNextSiblingElement(&child).is_err())
     }
 }
 
@@ -538,11 +623,52 @@ impl Composition {
             editor.write(text, deadline, None)
         }
     }
+
+    pub(super) fn revise(
+        &mut self,
+        editor: &Editor,
+        text: &str,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        if self.written.is_none() {
+            return Err(EDIT_CHANGED.into());
+        }
+        self.update(editor, text, deadline)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{revision, Composition, Selection};
+    use super::{
+        normalize_feishu, revision, Composition, Selection, FEISHU_EMPTY_TAIL, FEISHU_TRAILER,
+    };
+
+    #[test]
+    fn feishu_normalizes_the_empty_label_only_when_its_tree_matches() {
+        let original = Selection {
+            before: "发送给 测试\n\u{200b}".into(),
+            selected: String::new(),
+            after: FEISHU_EMPTY_TAIL.into(),
+        };
+        let mut snapshot = original.clone();
+        normalize_feishu(&mut snapshot, |_| false);
+        assert_eq!(snapshot, original);
+        normalize_feishu(&mut snapshot, |label| label == "发送给 测试");
+        assert!(snapshot.before.is_empty() && snapshot.after.is_empty());
+    }
+
+    #[test]
+    fn feishu_preserves_draft_text_selection_and_extra_line_breaks() {
+        let mut snapshot = Selection {
+            before: "已有\u{200b}草稿".into(),
+            selected: "待替换".into(),
+            after: format!("剩余\n{FEISHU_TRAILER}"),
+        };
+        normalize_feishu(&mut snapshot, |_| panic!("not an empty draft"));
+        assert_eq!(snapshot.before, "已有\u{200b}草稿");
+        assert_eq!(snapshot.selected, "待替换");
+        assert_eq!(snapshot.after, "剩余\n");
+    }
 
     #[test]
     fn cancellation_removes_only_known_preview_and_preserves_manual_suffix_edits() {

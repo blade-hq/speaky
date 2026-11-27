@@ -1,14 +1,17 @@
+use crate::theme;
 use gpui::{
     div, prelude::*, px, rgb, size, App, Bounds, Context, Window, WindowBackgroundAppearance,
     WindowBounds, WindowKind, WindowOptions,
 };
 use std::time::Duration;
 
-pub(crate) const MESSAGE: &str = "语音识别内容已保存到剪贴板，请手动粘贴";
-
 struct Notice;
 impl gpui::Render for Notice {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        crate::overlay::apply_native_theme(window);
+        #[cfg(not(target_os = "macos"))]
+        let _ = window;
         div()
             .w(px(430.))
             .h(px(70.))
@@ -17,27 +20,21 @@ impl gpui::Render for Notice {
             .items_center()
             .gap_3()
             .rounded(px(16.))
-            .bg(rgb(0x21293c))
-            .text_color(rgb(0xf0f6f7))
+            .bg(rgb(theme::surface()))
+            .text_color(rgb(theme::ink()))
             .text_size(px(14.))
-            .child(crate::icons::Icon::Copy.render(0x83e4d0))
-            .child(MESSAGE)
+            .child(crate::icons::Icon::Copy.render(theme::accent()))
+            .child(crate::CLIPBOARD_FALLBACK_MESSAGE)
     }
 }
 
 pub(crate) fn show(cx: &mut App) -> Result<(), String> {
-    #[cfg(windows)]
-    let display_id =
-        crate::windows_floating::display_id(crate::windows_floating::active_monitor(), cx);
-    #[cfg(not(windows))]
-    let display_id = None;
-    let bounds = Bounds::centered(display_id, size(px(430.), px(70.)), cx);
+    let bounds = Bounds::centered(None, size(px(430.), px(70.)), cx);
     let mut shown = Ok(());
     let handle = cx
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                display_id,
                 titlebar: None,
                 focus: false,
                 show: false,
@@ -50,17 +47,7 @@ pub(crate) fn show(cx: &mut App) -> Result<(), String> {
             },
             |window, cx| {
                 window.set_window_title("Speaky · 剪贴板");
-                #[cfg(windows)]
-                {
-                    let drag = std::rc::Rc::new(crate::windows_floating::WindowDrag::new(
-                        "clipboard-position.json",
-                    ));
-                    shown = crate::overlay::show_panel(window, &bounds, &drag, None);
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    shown = crate::overlay::show_panel(window, &bounds, false);
-                }
+                shown = crate::overlay::show_panel(window, &bounds, false);
                 cx.new(|_| Notice)
             },
         )

@@ -1,4 +1,4 @@
-use super::{openai::RUNTIME, Protocol, RemoteEngine};
+use super::{openai::RUNTIME, remote::gemini, Protocol, RemoteEngine};
 use crate::config::RemoteService;
 use reqwest::Url;
 use serde::Deserialize;
@@ -11,6 +11,13 @@ use crate::session::SAMPLE_AUDIO as SAMPLE;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn candidates(address: &str) -> Result<Vec<(Protocol, Url)>, String> {
+    candidates_for_model(address, None)
+}
+
+fn candidates_for_model(
+    address: &str,
+    model: Option<&str>,
+) -> Result<Vec<(Protocol, Url)>, String> {
     let url =
         Url::parse(address.trim()).map_err(|_| "请输入包含 http(s):// 或 ws(s):// 的服务地址。")?;
     if !url.has_host()
@@ -20,6 +27,9 @@ fn candidates(address: &str) -> Result<Vec<(Protocol, Url)>, String> {
         || url.fragment().is_some()
     {
         return Err("请填写服务地址，将凭据单独填在 API 密钥栏。".into());
+    }
+    if let Some(endpoint) = gemini::detect_endpoint(&url, model)? {
+        return Ok(vec![(Protocol::Gemini, endpoint)]);
     }
     let ws_scheme = match url.scheme() {
         "ws" | "wss" => return Ok(vec![(Protocol::FunAsr, url)]),
@@ -64,8 +74,18 @@ fn candidates(address: &str) -> Result<Vec<(Protocol, Url)>, String> {
 
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(4);
 
-fn read_model_catalog(
-    endpoint: &Url,
+fn transcription_catalog_url(endpoint: &Url) -> Result<Url, String> {
+    let base = endpoint
+        .path()
+        .strip_suffix("/audio/transcriptions")
+        .ok_or("转写地址缺少路径。")?;
+    let mut catalog_url = endpoint.clone();
+    catalog_url.set_path(&format!("{base}/models"));
+    Ok(catalog_url)
+}
+
+pub(crate) fn read_model_catalog(
+    catalog_url: Url,
     api_key: &str,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
@@ -77,12 +97,6 @@ fn read_model_catalog(
     struct Catalog {
         data: Vec<Model>,
     }
-    let mut catalog_url = endpoint.clone();
-    let base = endpoint
-        .path()
-        .strip_suffix("/audio/transcriptions")
-        .ok_or("转写地址缺少路径。")?;
-    catalog_url.set_path(&format!("{base}/models"));
     RUNTIME.block_on(async {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -136,7 +150,8 @@ pub fn list_models(address: &str, api_key: &str) -> Result<ModelCatalog, String>
         if protocol != Protocol::OpenAI {
             continue;
         }
-        match read_model_catalog(&endpoint, api_key.trim(), CATALOG_TIMEOUT) {
+        let catalog_url = transcription_catalog_url(&endpoint)?;
+        match read_model_catalog(catalog_url, api_key.trim(), CATALOG_TIMEOUT) {
             Ok(models) if !models.is_empty() => {
                 return Ok(ModelCatalog {
                     endpoint: endpoint.to_string(),
@@ -156,7 +171,7 @@ pub fn list_models(address: &str, api_key: &str) -> Result<ModelCatalog, String>
 
 // A catalog can supply a missing model ID. Only transcribing the sample establishes readiness.
 fn single_model(endpoint: &Url, api_key: &str, remaining: Duration) -> Result<String, String> {
-    let mut models = read_model_catalog(endpoint, api_key, remaining)?;
+    let mut models = read_model_catalog(transcription_catalog_url(endpoint)?, api_key, remaining)?;
     if models.len() == 1 {
         Ok(models.remove(0))
     } else {
@@ -173,7 +188,7 @@ pub fn detect_service(
     let api_key = api_key.trim();
     let mut failures = Vec::new();
     let started = Instant::now();
-    for (protocol, endpoint) in candidates(address)? {
+    for (protocol, endpoint) in candidates_for_model(address, Some(model.trim()))? {
         let remaining = CHECK_TIMEOUT.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             failures.push("自动检测超时，请确认模型已就绪后重试。".into());
@@ -185,6 +200,9 @@ pub fn detect_service(
                     single_model(&endpoint, api_key, remaining)?
                 }
                 Protocol::OpenAI => model.trim().to_owned(),
+                Protocol::Gemini => gemini::endpoint_model(&endpoint)
+                    .ok_or("请检查 AutoDL Gemini 转写地址。")?
+                    .to_owned(),
                 _ => String::new(), // Native services select the loaded model server-side.
             };
             let service = RemoteService {
@@ -367,5 +385,34 @@ mod tests {
         ] {
             assert!(candidates(address).is_err());
         }
+    }
+
+    #[test]
+    fn detects_autodl_gemini_without_falling_back_to_unrelated_routes() {
+        use super::super::AUTODL_ASR_MODEL;
+
+        let base = "https://www.autodl.art/api/v1";
+        let endpoint = gemini::endpoint(AUTODL_ASR_MODEL).unwrap();
+        let routes = vec![(Protocol::Gemini, endpoint.clone())];
+        for address in [base, &format!("{base}/gemini/"), endpoint.as_str()] {
+            assert_eq!(candidates_for_model(address, Some("")).unwrap(), routes);
+        }
+        let pro = "gemini-3.1-pro-preview";
+        assert_eq!(
+            candidates_for_model(base, Some(pro)).unwrap(),
+            [(Protocol::Gemini, gemini::endpoint(pro).unwrap())]
+        );
+        assert!(candidates_for_model(endpoint.as_str(), Some(pro)).is_err());
+        assert!(candidates_for_model(base, Some("gemini-../../other")).is_err());
+        assert!(candidates_for_model(
+            "https://www.autodl.art.evil.example/api/v1/gemini/v1beta",
+            Some(pro)
+        )
+        .is_err());
+        assert_eq!(candidates(base).unwrap()[0].0, Protocol::OpenAI);
+        assert_eq!(
+            candidates_for_model(base, Some("other-asr")).unwrap()[0].0,
+            Protocol::OpenAI
+        );
     }
 }

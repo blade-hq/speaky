@@ -111,6 +111,10 @@ impl Default for Shortcut {
 
 #[allow(non_upper_case_globals)]
 impl Shortcut {
+    #[cfg(windows)]
+    pub(crate) fn windows_key(self) -> Option<(u32, u32)> {
+        super::windows::key_and_modifiers(self).ok()
+    }
     pub const OptionShiftSpace: Self = Self {
         key: Key::Named("space"),
         modifiers: ALT | SHIFT,

@@ -1,0 +1,932 @@
+--- a/src/platform/windows/destination_list.rs
++++ b/src/platform/windows/destination_list.rs
+@@ -8 +7,0 @@
+-        Globalization::u_strlen,
+@@ -102,2 +101,2 @@
+-            let len = unsafe { u_strlen(buffer.as_ptr()) };
+-            String::from_utf16_lossy(&buffer[..len as usize])
++            let len = buffer.iter().position(|&value| value == 0).unwrap_or(buffer.len());
++            String::from_utf16_lossy(&buffer[..len])
+--- a/src/platform/windows/direct_write.rs
++++ b/src/platform/windows/direct_write.rs
+@@ -7,0 +8,4 @@
++#[cfg(not(target_vendor = "win7"))]
++use windows::Win32::Graphics::{
++    Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, Direct3D11::*, Dxgi::Common::*,
++};
+@@ -12,4 +16 @@
+-        Graphics::{
+-            Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, Direct3D11::*, DirectWrite::*,
+-            Dxgi::Common::*, Gdi::LOGFONTW,
+-        },
++        Graphics::{DirectWrite::*, Gdi::LOGFONTW},
+@@ -20,0 +22 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -23,0 +26,18 @@
++
++#[cfg(target_vendor = "win7")]
++type TextFactory = IDWriteFactory;
++#[cfg(not(target_vendor = "win7"))]
++type TextFactory = IDWriteFactory5;
++#[cfg(target_vendor = "win7")]
++type FontFace = IDWriteFontFace;
++#[cfg(not(target_vendor = "win7"))]
++type FontFace = IDWriteFontFace3;
++#[cfg(target_vendor = "win7")]
++type FontCollection = IDWriteFontCollection;
++#[cfg(not(target_vendor = "win7"))]
++type FontCollection = IDWriteFontCollection1;
++
++#[cfg(target_vendor = "win7")]
++const ALPHA_TEXTURE: DWRITE_TEXTURE_TYPE = DWRITE_TEXTURE_CLEARTYPE_3x1;
++#[cfg(not(target_vendor = "win7"))]
++const ALPHA_TEXTURE: DWRITE_TEXTURE_TYPE = DWRITE_TEXTURE_ALIASED_1x1;
+@@ -28 +48,3 @@
+-    font_face: IDWriteFontFace3,
++    font_face: FontFace,
++    weight: DWRITE_FONT_WEIGHT,
++    style: DWRITE_FONT_STYLE,
+@@ -29,0 +52 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -38 +61,2 @@
+-    factory: IDWriteFactory5,
++    factory: TextFactory,
++    #[cfg(not(target_vendor = "win7"))]
+@@ -39,0 +64 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -42,0 +68 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -45,0 +72 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -58,2 +85,2 @@
+-    system_font_collection: IDWriteFontCollection1,
+-    custom_font_collection: IDWriteFontCollection1,
++    system_font_collection: FontCollection,
++    custom_font_collection: FontCollection,
+@@ -73,0 +101,2 @@
++        #[cfg(target_vendor = "win7")]
++        let _ = directx_devices;
+@@ -76 +105 @@
+-            let factory: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
++            let factory: TextFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+@@ -79,0 +109 @@
++            #[cfg(not(target_vendor = "win7"))]
+@@ -80,0 +111 @@
++            #[cfg(not(target_vendor = "win7"))]
+@@ -81,0 +113 @@
++            #[cfg(not(target_vendor = "win7"))]
+@@ -87,0 +120 @@
++            #[cfg(not(target_vendor = "win7"))]
+@@ -92,0 +126 @@
++                #[cfg(not(target_vendor = "win7"))]
+@@ -93,0 +128 @@
++                #[cfg(not(target_vendor = "win7"))]
+@@ -95,0 +131 @@
++                #[cfg(not(target_vendor = "win7"))]
+@@ -101,0 +138 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -188,7 +225,4 @@
+-        let system_font_collection = unsafe {
+-            let mut result = std::mem::zeroed();
+-            components
+-                .factory
+-                .GetSystemFontCollection(false, &mut result, true)?;
+-            result.unwrap()
+-        };
++        let system_font_collection = system_collection(&components.factory)?;
++        #[cfg(target_vendor = "win7")]
++        let custom_font_collection = system_font_collection.clone();
++        #[cfg(not(target_vendor = "win7"))]
+@@ -195,0 +230 @@
++        #[cfg(not(target_vendor = "win7"))]
+@@ -214,0 +250 @@
++        #[cfg(not(target_vendor = "win7"))]
+@@ -215,0 +252,2 @@
++        #[cfg(target_vendor = "win7")]
++        let _ = directx_devices;
+@@ -283,0 +322,9 @@
++    #[cfg(target_vendor = "win7")]
++    fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
++        if !fonts.is_empty() {
++            anyhow::bail!("Additional fonts must be installed in Windows on this platform");
++        }
++        Ok(())
++    }
++
++    #[cfg(not(target_vendor = "win7"))]
+@@ -323,0 +371 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -387,0 +436 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -433,0 +483,2 @@
++                weight: unsafe { font_face.GetWeight() },
++                style: unsafe { font_face.GetStyle() },
+@@ -446,0 +498,48 @@
++    #[cfg(target_vendor = "win7")]
++    unsafe fn get_font_id_from_font_collection(
++        &mut self,
++        family_name: &str,
++        font_weight: FontWeight,
++        font_style: FontStyle,
++        font_features: &FontFeatures,
++        _font_fallbacks: Option<&FontFallbacks>,
++        is_system_font: bool,
++    ) -> Option<FontId> {
++        if !is_system_font {
++            return None;
++        }
++        let collection = &self.system_font_collection;
++        let mut index = 0;
++        let mut exists = BOOL(0);
++        unsafe {
++            collection
++                .FindFamilyName(&HSTRING::from(family_name), &mut index, &mut exists)
++                .log_err()?;
++            if !exists.as_bool() {
++                return None;
++            }
++            let family = collection.GetFontFamily(index).log_err()?;
++            let font = family
++                .GetFirstMatchingFont(
++                    font_weight.into(),
++                    DWRITE_FONT_STRETCH_NORMAL,
++                    font_style.into(),
++                )
++                .log_err()?;
++            let font_face = font.CreateFontFace().log_err()?;
++            let (identifier, _, _) = legacy_font_info(&font, &self.components.locale).log_err()?;
++            let features = self.generate_font_features(font_features).log_err()?;
++            let font_id = FontId(self.fonts.len());
++            self.fonts.push(FontInfo {
++                font_family: family_name.to_owned(),
++                font_face,
++                weight: font.GetWeight(),
++                style: font.GetStyle(),
++                features,
++                is_system_font,
++            });
++            self.font_id_by_identifier.insert(identifier, font_id);
++            Some(font_id)
++        }
++    }
++
+@@ -448,9 +547,2 @@
+-        let mut collection = unsafe { std::mem::zeroed() };
+-        if unsafe {
+-            self.components
+-                .factory
+-                .GetSystemFontCollection(false, &mut collection, true)
+-                .log_err()
+-                .is_some()
+-        } {
+-            self.system_font_collection = collection.unwrap();
++        if let Some(collection) = system_collection(&self.components.factory).log_err() {
++            self.system_font_collection = collection;
+@@ -572,16 +664,17 @@
+-                let format: IDWriteTextFormat1 = self
+-                    .components
+-                    .factory
+-                    .CreateTextFormat(
+-                        &HSTRING::from(&font_info.font_family),
+-                        collection,
+-                        font_info.font_face.GetWeight(),
+-                        font_info.font_face.GetStyle(),
+-                        DWRITE_FONT_STRETCH_NORMAL,
+-                        font_size.0,
+-                        &HSTRING::from(&self.components.locale),
+-                    )?
+-                    .cast()?;
+-                if let Some(ref fallbacks) = font_info.fallbacks {
+-                    format.SetFontFallback(fallbacks)?;
+-                }
++                let format = self.components.factory.CreateTextFormat(
++                    &HSTRING::from(&font_info.font_family),
++                    collection,
++                    font_info.weight,
++                    font_info.style,
++                    DWRITE_FONT_STRETCH_NORMAL,
++                    font_size.0,
++                    &HSTRING::from(&self.components.locale),
++                )?;
++                #[cfg(not(target_vendor = "win7"))]
++                let format = {
++                    let format: IDWriteTextFormat1 = format.cast()?;
++                    if let Some(ref fallbacks) = font_info.fallbacks {
++                        format.SetFontFallback(fallbacks)?;
++                    }
++                    format
++                };
+@@ -640,2 +733,2 @@
+-                text_layout.SetFontStyle(font_info.font_face.GetStyle(), text_range)?;
+-                text_layout.SetFontWeight(font_info.font_face.GetWeight(), text_range)?;
++                text_layout.SetFontStyle(font_info.style, text_range)?;
++                text_layout.SetFontWeight(font_info.weight, text_range)?;
+@@ -674 +767,2 @@
+-            let mut metrics = std::mem::zeroed();
++            let mut metrics = DWRITE_FONT_METRICS1::default();
++            #[cfg(not(target_vendor = "win7"))]
+@@ -675,0 +770,9 @@
++            #[cfg(target_vendor = "win7")]
++            {
++                font_info.font_face.GetMetrics(&mut metrics.Base);
++                let bounds = legacy_font_bounds(&font_info.font_face);
++                metrics.glyphBoxLeft = bounds[0];
++                metrics.glyphBoxBottom = bounds[1];
++                metrics.glyphBoxRight = bounds[2];
++                metrics.glyphBoxTop = bounds[3];
++            }
+@@ -731,22 +834,39 @@
+-        let mut rendering_mode = DWRITE_RENDERING_MODE1::default();
+-        let mut grid_fit_mode = DWRITE_GRID_FIT_MODE::default();
+-        unsafe {
+-            font.font_face.GetRecommendedRenderingMode(
+-                params.font_size.0,
+-                // Using 96 as scale is applied by the transform
+-                96.0,
+-                96.0,
+-                Some(&transform),
+-                false,
+-                DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
+-                DWRITE_MEASURING_MODE_NATURAL,
+-                None,
+-                &mut rendering_mode,
+-                &mut grid_fit_mode,
+-            )?;
+-        }
+-        let rendering_mode = match rendering_mode {
+-            DWRITE_RENDERING_MODE1_OUTLINE => DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
+-            m => m,
+-        };
+-
++        #[cfg(not(target_vendor = "win7"))]
++        let glyph_analysis = {
++            let mut rendering_mode = DWRITE_RENDERING_MODE1::default();
++            let mut grid_fit_mode = DWRITE_GRID_FIT_MODE::default();
++            unsafe {
++                font.font_face.GetRecommendedRenderingMode(
++                    params.font_size.0,
++                    // Using 96 as scale is applied by the transform
++                    96.0,
++                    96.0,
++                    Some(&transform),
++                    false,
++                    DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
++                    DWRITE_MEASURING_MODE_NATURAL,
++                    None,
++                    &mut rendering_mode,
++                    &mut grid_fit_mode,
++                )?;
++            }
++            let rendering_mode = match rendering_mode {
++                DWRITE_RENDERING_MODE1_OUTLINE => DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
++                m => m,
++            };
++
++            let glyph_analysis = unsafe {
++                self.components.factory.CreateGlyphRunAnalysis(
++                    &glyph_run,
++                    Some(&transform),
++                    rendering_mode,
++                    DWRITE_MEASURING_MODE_NATURAL,
++                    grid_fit_mode,
++                    DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
++                    baseline_origin_x,
++                    baseline_origin_y,
++                )
++            }?;
++            glyph_analysis
++        };
++        #[cfg(target_vendor = "win7")]
+@@ -755,0 +876 @@
++                1.0,
+@@ -757 +878 @@
+-                rendering_mode,
++                DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+@@ -759,2 +879,0 @@
+-                grid_fit_mode,
+-                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+@@ -763,2 +882,2 @@
+-            )
+-        }?;
++            )?
++        };
+@@ -771 +890 @@
+-        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1)? };
++        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(ALPHA_TEXTURE)? };
+@@ -810,0 +930,3 @@
++        #[cfg(target_vendor = "win7")]
++        let bitmap_data = self.rasterize_monochrome(params, glyph_bounds)?;
++        #[cfg(not(target_vendor = "win7"))]
+@@ -833,2 +955,5 @@
+-        let mut bitmap_data =
+-            vec![0u8; glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize];
++        let pixel_count = glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize;
++        #[cfg(target_vendor = "win7")]
++        let mut bitmap_data = vec![0u8; pixel_count * 3];
++        #[cfg(not(target_vendor = "win7"))]
++        let mut bitmap_data = vec![0u8; pixel_count];
+@@ -839 +964 @@
+-                DWRITE_TEXTURE_ALIASED_1x1,
++                ALPHA_TEXTURE,
+@@ -849,0 +975,5 @@
++        #[cfg(target_vendor = "win7")]
++        let bitmap_data = bitmap_data
++            .chunks_exact(3)
++            .map(|rgb| ((u16::from(rgb[0]) + u16::from(rgb[1]) + u16::from(rgb[2])) / 3) as u8)
++            .collect();
+@@ -852,0 +983 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -935 +1066 @@
+-                            DWRITE_TEXTURE_ALIASED_1x1,
++                            ALPHA_TEXTURE,
+@@ -1209 +1340 @@
+-        let mut result =
++        let result =
+@@ -1211,4 +1342,9 @@
+-        result.extend(get_font_names_from_collection(
+-            &self.custom_font_collection,
+-            &self.components.locale,
+-        ));
++        #[cfg(not(target_vendor = "win7"))]
++        let result = {
++            let mut result = result;
++            result.extend(get_font_names_from_collection(
++                &self.custom_font_collection,
++                &self.components.locale,
++            ));
++            result
++        };
+@@ -1217,0 +1354 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -1232,0 +1370 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1243,0 +1382 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1251,0 +1391 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1315,0 +1456 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1467,2 +1608 @@
+-        // This `cast()` action here should never fail since we are running on Win10+, and
+-        // `IDWriteFontFace3` requires Win10
++        #[cfg(not(target_vendor = "win7"))]
+@@ -1469,0 +1610 @@
++        #[cfg(not(target_vendor = "win7"))]
+@@ -1473,0 +1615,11 @@
++        };
++        #[cfg(target_vendor = "win7")]
++        let (font_identifier, font_struct, _) = {
++            let font = unsafe {
++                context
++                    .text_system
++                    .system_font_collection
++                    .GetFontFromFontFace(font_face)
++            }?;
++            legacy_font_info(&font, &self.locale)
++                .map_err(|error| windows::core::Error::new(E_FAIL, error.to_string()))?
+@@ -1506,0 +1659 @@
++                #[cfg(not(target_vendor = "win7"))]
+@@ -1508,0 +1662,2 @@
++                #[cfg(target_vendor = "win7")]
++                let is_emoji = false;
+@@ -1644,4 +1799,78 @@
+-fn get_font_names_from_collection(
+-    collection: &IDWriteFontCollection1,
+-    locale: &str,
+-) -> Vec<String> {
++fn system_collection(factory: &TextFactory) -> Result<FontCollection> {
++    let mut collection = None;
++    unsafe {
++        #[cfg(target_vendor = "win7")]
++        factory.GetSystemFontCollection(&mut collection, true)?;
++        #[cfg(not(target_vendor = "win7"))]
++        factory.GetSystemFontCollection(false, &mut collection, true)?;
++    }
++    collection.context("DirectWrite did not return its system font collection")
++}
++
++#[cfg(target_vendor = "win7")]
++fn legacy_font_info(font: &IDWriteFont, locale: &str) -> Result<(FontIdentifier, Font, bool)> {
++    unsafe {
++        let family_name = get_name(font.GetFontFamily()?.GetFamilyNames()?, locale)?;
++        let mut info = None;
++        let mut exists = BOOL(0);
++        font.GetInformationalStrings(
++            DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME,
++            &mut info,
++            &mut exists,
++        )?;
++        let postscript_name = match info {
++            Some(info) => get_name(info, locale)?,
++            None => family_name.clone(),
++        };
++        let weight = font.GetWeight();
++        let style = font.GetStyle();
++        Ok((
++            FontIdentifier {
++                postscript_name,
++                weight: weight.0,
++                style: style.0,
++            },
++            Font {
++                family: family_name.into(),
++                features: FontFeatures::default(),
++                weight: weight.into(),
++                style: style.into(),
++                fallbacks: None,
++            },
++            false,
++        ))
++    }
++}
++
++#[cfg(target_vendor = "win7")]
++fn legacy_font_bounds(face: &IDWriteFontFace) -> [i16; 4] {
++    let mut data = std::ptr::null_mut();
++    let mut size = 0;
++    let mut context = std::ptr::null_mut();
++    let mut exists = BOOL(0);
++    unsafe {
++        if face
++            .TryGetFontTable(
++                u32::from_le_bytes(*b"head"),
++                &mut data,
++                &mut size,
++                &mut context,
++                &mut exists,
++            )
++            .is_err()
++            || !exists.as_bool()
++        {
++            return [0; 4];
++        }
++        let mut result = [0; 4];
++        if size >= 44 && !data.is_null() {
++            let bytes = std::slice::from_raw_parts(data.cast::<u8>().add(36), 8);
++            for (output, value) in result.iter_mut().zip(bytes.chunks_exact(2)) {
++                *output = i16::from_be_bytes([value[0], value[1]]);
++            }
++        }
++        face.ReleaseFontTable(context);
++        result
++    }
++}
++fn get_font_names_from_collection(collection: &FontCollection, locale: &str) -> Vec<String> {
+@@ -1667,0 +1897 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1693,0 +1924 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1706,0 +1938 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1844,0 +2077 @@
++#[cfg(not(target_vendor = "win7"))]
+--- a/src/platform/windows/directx_devices.rs
++++ b/src/platform/windows/directx_devices.rs
+@@ -8 +8 @@
+-            D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
++            D3D_FEATURE_LEVEL_11_0,
+@@ -11,3 +11,3 @@
+-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
+-            D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS,
+-            D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
++            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS,
++            D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS, D3D11_SDK_VERSION, D3D11CreateDevice,
++            ID3D11Device, ID3D11DeviceContext,
+@@ -15,4 +15 @@
+-        Dxgi::{
+-            CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
+-            IDXGIAdapter1, IDXGIFactory6,
+-        },
++        Dxgi::IDXGIAdapter1,
+@@ -21,0 +19,19 @@
++
++#[cfg(target_vendor = "win7")]
++use windows::Win32::Graphics::{
++    Direct3D::D3D_DRIVER_TYPE_WARP,
++    Dxgi::{CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1},
++};
++#[cfg(not(target_vendor = "win7"))]
++use windows::Win32::Graphics::{
++    Direct3D::D3D_FEATURE_LEVEL_11_1,
++    Direct3D11::D3D11_CREATE_DEVICE_DEBUG,
++    Dxgi::{
++        CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS, IDXGIFactory6,
++    },
++};
++
++#[cfg(not(target_vendor = "win7"))]
++pub(crate) type DxgiFactory = IDXGIFactory6;
++#[cfg(target_vendor = "win7")]
++pub(crate) type DxgiFactory = IDXGIFactory1;
+@@ -46 +62 @@
+-    pub(crate) dxgi_factory: IDXGIFactory6,
++    pub(crate) dxgi_factory: DxgiFactory,
+@@ -51,0 +68 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -90,2 +107,64 @@
+-}
+-
++
++    #[cfg(target_vendor = "win7")]
++    pub(crate) fn new() -> Result<Self> {
++        let dxgi_factory: DxgiFactory =
++            unsafe { CreateDXGIFactory1() }.context("Creating DXGI 1.1 factory")?;
++        for index in 0.. {
++            let Ok(adapter) = (unsafe { dxgi_factory.EnumAdapters1(index) }) else {
++                break;
++            };
++            if let Some((device, device_context)) = get_legacy_device(Some(&adapter)).log_err() {
++                return Ok(Self {
++                    adapter,
++                    dxgi_factory,
++                    device,
++                    device_context,
++                });
++            }
++        }
++        let (device, device_context) =
++            get_legacy_device(None).context("Creating Direct3D 11 WARP device")?;
++        let adapter = unsafe { device.cast::<IDXGIDevice>()?.GetAdapter()? }.cast()?;
++        Ok(Self {
++            adapter,
++            dxgi_factory,
++            device,
++            device_context,
++        })
++    }
++}
++
++#[cfg(target_vendor = "win7")]
++fn get_legacy_device(
++    adapter: Option<&IDXGIAdapter1>,
++) -> Result<(ID3D11Device, ID3D11DeviceContext)> {
++    let mut device = None;
++    let mut context = None;
++    let mut level = D3D_FEATURE_LEVEL::default();
++    let driver = if adapter.is_some() {
++        D3D_DRIVER_TYPE_UNKNOWN
++    } else {
++        D3D_DRIVER_TYPE_WARP
++    };
++    unsafe {
++        D3D11CreateDevice(
++            adapter.map(|adapter| &**adapter),
++            driver,
++            HMODULE::default(),
++            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
++            Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1]),
++            D3D11_SDK_VERSION,
++            Some(&mut device),
++            Some(&mut level),
++            Some(&mut context),
++        )?;
++    }
++    let device = device.context("Direct3D returned no device")?;
++    let context = context.context("Direct3D returned no immediate context")?;
++    if level == D3D_FEATURE_LEVEL_10_1 {
++        check_structured_buffers(&device)?;
++    }
++    Ok((device, context))
++}
++
++#[cfg(not(target_vendor = "win7"))]
+@@ -108,2 +187,3 @@
+-#[inline]
+-fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
++#[cfg(not(target_vendor = "win7"))]
++#[inline]
++fn get_dxgi_factory(debug_layer_available: bool) -> Result<DxgiFactory> {
+@@ -122,2 +202,3 @@
+-#[inline]
+-fn get_adapter(dxgi_factory: &IDXGIFactory6, debug_layer_available: bool) -> Result<IDXGIAdapter1> {
++#[cfg(not(target_vendor = "win7"))]
++#[inline]
++fn get_adapter(dxgi_factory: &DxgiFactory, debug_layer_available: bool) -> Result<IDXGIAdapter1> {
+@@ -144,0 +226 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -176,0 +259,5 @@
++    check_structured_buffers(&device)?;
++    Ok(device)
++}
++
++fn check_structured_buffers(device: &ID3D11Device) -> Result<()> {
+@@ -191 +278 @@
+-        Ok(device)
++        Ok(())
+--- a/src/platform/windows/directx_renderer.rs
++++ b/src/platform/windows/directx_renderer.rs
+@@ -14 +13,0 @@
+-            DirectComposition::*,
+@@ -21,0 +21,4 @@
++#[cfg(not(target_vendor = "win7"))]
++use windows::Win32::Graphics::DirectComposition::*;
++
++use super::directx_devices::DxgiFactory;
+@@ -30,0 +34,12 @@
++#[cfg(not(target_vendor = "win7"))]
++const SWAP_CHAIN_FORMAT: DXGI_FORMAT = RENDER_TARGET_FORMAT;
++#[cfg(target_vendor = "win7")]
++const SWAP_CHAIN_FORMAT: DXGI_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
++#[cfg(not(target_vendor = "win7"))]
++type SwapChain = IDXGISwapChain1;
++#[cfg(target_vendor = "win7")]
++type SwapChain = IDXGISwapChain;
++#[cfg(not(target_vendor = "win7"))]
++const SWAP_CHAIN_BUFFER_COUNT: u32 = BUFFER_COUNT as u32;
++#[cfg(target_vendor = "win7")]
++const SWAP_CHAIN_BUFFER_COUNT: u32 = 1;
+@@ -45,0 +61 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -54 +70 @@
+-    pub(crate) dxgi_factory: IDXGIFactory6,
++    pub(crate) dxgi_factory: DxgiFactory,
+@@ -56,0 +73 @@
++    #[cfg(not(target_vendor = "win7"))]
+@@ -62 +79 @@
+-    swap_chain: IDXGISwapChain1,
++    swap_chain: SwapChain,
+@@ -92,0 +110 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -109,0 +128,3 @@
++        #[cfg(target_vendor = "win7")]
++        let _ = disable_direct_composition;
++        #[cfg(not(target_vendor = "win7"))]
+@@ -120,0 +142 @@
++            #[cfg(not(target_vendor = "win7"))]
+@@ -131,0 +154 @@
++        let disable_direct_composition = cfg!(target_vendor = "win7") || disable_direct_composition;
+@@ -146,0 +170 @@
++        #[cfg(not(target_vendor = "win7"))]
+@@ -164,0 +189 @@
++            #[cfg(not(target_vendor = "win7"))]
+@@ -226,0 +252 @@
++        #[cfg(not(target_vendor = "win7"))]
+@@ -227,0 +254,2 @@
++        #[cfg(target_vendor = "win7")]
++        let disable_direct_composition = true;
+@@ -244,0 +273 @@
++            #[cfg(not(target_vendor = "win7"))]
+@@ -260,0 +290 @@
++        #[cfg(not(target_vendor = "win7"))]
+@@ -276 +306,4 @@
+-        self.direct_composition = direct_composition;
++        #[cfg(not(target_vendor = "win7"))]
++        {
++            self.direct_composition = direct_composition;
++        }
+@@ -340 +373 @@
+-                    BUFFER_COUNT as u32,
++                    SWAP_CHAIN_BUFFER_COUNT,
+@@ -343 +376 @@
+-                    RENDER_TARGET_FORMAT,
++                    SWAP_CHAIN_FORMAT,
+@@ -611,3 +644,21 @@
+-            let factory: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
+-            let render_params: IDWriteRenderingParams1 =
+-                factory.CreateRenderingParams().unwrap().cast().unwrap();
++            #[cfg(not(target_vendor = "win7"))]
++            let (gamma, grayscale_enhanced_contrast) = {
++                let factory: IDWriteFactory5 =
++                    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
++                let render_params: IDWriteRenderingParams1 =
++                    factory.CreateRenderingParams().unwrap().cast().unwrap();
++                (
++                    render_params.GetGamma(),
++                    render_params.GetGrayscaleEnhancedContrast(),
++                )
++            };
++            #[cfg(target_vendor = "win7")]
++            let (gamma, grayscale_enhanced_contrast) = {
++                let factory: IDWriteFactory =
++                    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
++                let render_params = factory.CreateRenderingParams().unwrap();
++                (
++                    render_params.GetGamma(),
++                    render_params.GetEnhancedContrast(),
++                )
++            };
+@@ -615,2 +666,2 @@
+-                gamma_ratios: Self::get_gamma_ratios(render_params.GetGamma()),
+-                grayscale_enhanced_contrast: render_params.GetGrayscaleEnhancedContrast(),
++                gamma_ratios: Self::get_gamma_ratios(gamma),
++                grayscale_enhanced_contrast,
+@@ -662,0 +714,6 @@
++        #[cfg(target_vendor = "win7")]
++        let swap_chain = {
++            let _ = disable_direct_composition;
++            create_swap_chain(&devices.dxgi_factory, &devices.device, hwnd, width, height)?
++        };
++        #[cfg(not(target_vendor = "win7"))]
+@@ -789,0 +847 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1015,0 +1074 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1020,0 +1080 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1022 +1082 @@
+-    dxgi_factory: &IDXGIFactory6,
++    dxgi_factory: &DxgiFactory,
+@@ -1037 +1097 @@
+-        BufferCount: BUFFER_COUNT as u32,
++        BufferCount: SWAP_CHAIN_BUFFER_COUNT,
+@@ -1046,0 +1107 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -1048 +1109 @@
+-    dxgi_factory: &IDXGIFactory6,
++    dxgi_factory: &DxgiFactory,
+@@ -1066 +1127 @@
+-        BufferCount: BUFFER_COUNT as u32,
++        BufferCount: SWAP_CHAIN_BUFFER_COUNT,
+@@ -1077,0 +1139,36 @@
++#[cfg(target_vendor = "win7")]
++fn create_swap_chain(
++    dxgi_factory: &DxgiFactory,
++    device: &ID3D11Device,
++    hwnd: HWND,
++    width: u32,
++    height: u32,
++) -> Result<SwapChain> {
++    let desc = DXGI_SWAP_CHAIN_DESC {
++        BufferDesc: DXGI_MODE_DESC {
++            Width: width,
++            Height: height,
++            Format: SWAP_CHAIN_FORMAT,
++            ..Default::default()
++        },
++        SampleDesc: DXGI_SAMPLE_DESC {
++            Count: 1,
++            Quality: 0,
++        },
++        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
++        BufferCount: SWAP_CHAIN_BUFFER_COUNT,
++        OutputWindow: hwnd,
++        Windowed: true.into(),
++        SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
++        Flags: 0,
++    };
++    let mut swap_chain = None;
++    unsafe {
++        dxgi_factory
++            .CreateSwapChain(device, &desc, &mut swap_chain)
++            .ok()?;
++        dxgi_factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)?;
++    }
++    swap_chain.context("DXGI returned no swap chain")
++}
++
+@@ -1081 +1178 @@
+-    swap_chain: &IDXGISwapChain1,
++    swap_chain: &SwapChain,
+@@ -1113 +1210 @@
+-    swap_chain: &IDXGISwapChain1,
++    swap_chain: &SwapChain,
+@@ -1388,0 +1486 @@
++#[cfg(not(target_vendor = "win7"))]
+--- a/src/platform/windows/dispatcher.rs
++++ b/src/platform/windows/dispatcher.rs
+@@ -8,0 +9,2 @@
++#[cfg(not(target_vendor = "win7"))]
++use windows::System::Threading::{ThreadPool, ThreadPoolTimer, TimerElapsedHandler, WorkItemHandler, WorkItemPriority};
+@@ -10,3 +11,0 @@
+-    System::Threading::{
+-        ThreadPool, ThreadPoolTimer, TimerElapsedHandler, WorkItemHandler, WorkItemPriority,
+-    },
+@@ -46,0 +46,11 @@
++    #[cfg(target_vendor = "win7")]
++    fn dispatch_on_threadpool(&self, runnable: Runnable) {
++        std::thread::spawn(move || { runnable.run(); });
++    }
++
++    #[cfg(target_vendor = "win7")]
++    fn dispatch_on_threadpool_after(&self, runnable: Runnable, duration: Duration) {
++        std::thread::spawn(move || { std::thread::sleep(duration); runnable.run(); });
++    }
++
++    #[cfg(not(target_vendor = "win7"))]
+@@ -57,0 +68 @@
++    #[cfg(not(target_vendor = "win7"))]
+--- a/src/platform/windows/display.rs
++++ b/src/platform/windows/display.rs
+@@ -5,0 +6,2 @@
++#[cfg(not(target_vendor = "win7"))]
++use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+@@ -10,4 +12 @@
+-        UI::{
+-            HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+-            WindowsAndMessaging::USER_DEFAULT_SCREEN_DPI,
+-        },
++        UI::WindowsAndMessaging::USER_DEFAULT_SCREEN_DPI,
+@@ -248,0 +248 @@
++#[cfg(not(target_vendor = "win7"))]
+@@ -255,0 +256,13 @@
++
++#[cfg(target_vendor = "win7")]
++fn get_scale_factor_for_monitor(_monitor: HMONITOR) -> Result<f32> {
++    unsafe {
++        let dc = GetDC(None);
++        let dpi = if dc.is_invalid() { 0 } else {
++            let dpi = GetDeviceCaps(Some(dc), LOGPIXELSX);
++            ReleaseDC(None, dc);
++            dpi
++        };
++        Ok(if dpi > 0 { dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32 } else { 1.0 })
++    }
++}
+--- a/src/platform/windows/events.rs
++++ b/src/platform/windows/events.rs
+@@ -12 +11,0 @@
+-            HiDpi::*,
+@@ -910,2 +909,2 @@
+-        let dpi = unsafe { GetDpiForWindow(handle) };
+-        let frame_y = unsafe { GetSystemMetricsForDpi(SM_CYFRAME, dpi) };
++        let dpi = window_dpi(handle);
++        let frame_y = window_system_metric(SM_CYFRAME, dpi);
+@@ -1514 +1513 @@
+-    let dpi = unsafe { GetDpiForWindow(handle) };
++    let dpi = window_dpi(handle);
+@@ -1537,2 +1536,2 @@
+-    let resize_frame_thickness = unsafe { GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) };
+-    let padding_thickness = unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };
++    let resize_frame_thickness = window_system_metric(SM_CXSIZEFRAME, dpi);
++    let padding_thickness = window_system_metric(SM_CXPADDEDBORDER, dpi);
+--- a/src/platform/windows/platform.rs
++++ b/src/platform/windows/platform.rs
+@@ -16,0 +17,2 @@
++#[cfg(not(target_vendor = "win7"))]
++use windows::UI::ViewManagement::UISettings;
+@@ -18 +19,0 @@
+-    UI::ViewManagement::UISettings,
+@@ -138 +139 @@
+-        let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
++        let disable_direct_composition = cfg!(target_vendor = "win7") || std::env::var(DISABLE_DIRECT_COMPOSITION)
+@@ -1015,0 +1017,4 @@
++#[cfg(target_vendor = "win7")]
++fn should_auto_hide_scrollbars() -> Result<bool> { Ok(false) }
++
++#[cfg(not(target_vendor = "win7"))]
+--- a/src/platform/windows/util.rs
++++ b/src/platform/windows/util.rs
+@@ -4,0 +5,2 @@
++#[cfg(not(target_vendor = "win7"))]
++use windows::UI::{Color, ViewManagement::{UIColorType, UISettings}};
+@@ -6,4 +7,0 @@
+-    UI::{
+-        Color,
+-        ViewManagement::{UIColorType, UISettings},
+-    },
+@@ -150,0 +149,4 @@
++#[cfg(target_vendor = "win7")]
++pub(crate) fn configure_dwm_dark_mode(_hwnd: HWND, _appearance: WindowAppearance) {}
++
++#[cfg(not(target_vendor = "win7"))]
+@@ -175,0 +178,4 @@
++#[cfg(target_vendor = "win7")]
++pub(crate) fn system_appearance() -> Result<WindowAppearance> { Ok(WindowAppearance::Light) }
++
++#[cfg(not(target_vendor = "win7"))]
+@@ -188,0 +195 @@
++#[cfg(not(target_vendor = "win7"))]
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -30,0 +31,33 @@
++// Win7 graphics use the system DPI; per-monitor DPI was introduced later.
++#[cfg(target_vendor = "win7")]
++pub(crate) fn window_dpi(hwnd: HWND) -> u32 {
++    unsafe {
++        let dc = GetDC(Some(hwnd));
++        if dc.is_invalid() {
++            return USER_DEFAULT_SCREEN_DPI;
++        }
++        let dpi = GetDeviceCaps(Some(dc), LOGPIXELSX);
++        ReleaseDC(Some(hwnd), dc);
++        if dpi > 0 {
++            dpi as u32
++        } else {
++            USER_DEFAULT_SCREEN_DPI
++        }
++    }
++}
++
++#[cfg(not(target_vendor = "win7"))]
++pub(crate) fn window_dpi(hwnd: HWND) -> u32 {
++    unsafe { GetDpiForWindow(hwnd) }
++}
++
++#[cfg(target_vendor = "win7")]
++pub(crate) fn window_system_metric(metric: SYSTEM_METRICS_INDEX, _dpi: u32) -> i32 {
++    unsafe { GetSystemMetrics(metric) }
++}
++
++#[cfg(not(target_vendor = "win7"))]
++pub(crate) fn window_system_metric(metric: SYSTEM_METRICS_INDEX, dpi: u32) -> i32 {
++    unsafe { GetSystemMetricsForDpi(metric, dpi) }
++}
++
+@@ -91 +124 @@
+-            let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
++            let monitor_dpi = window_dpi(hwnd) as f32;
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -158 +158 @@
+-            .inspect_err(|err| show_error("Failed to launch", err.to_string()))
++            .inspect_err(|err| show_error("Failed to launch", format!("{err:#}")))

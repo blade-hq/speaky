@@ -1,5 +1,5 @@
-//! Extract short replacements from an explicit user edit. Only the corrected
-//! spelling is retained; the user's sentence and the misheard text are not.
+//! Find short, reviewable replacements in an edited transcript.
+use super::Replacement;
 use std::ops::Range;
 
 fn han(ch: char) -> bool {
@@ -76,11 +76,36 @@ fn candidate(heard: &str, preferred: &str) -> bool {
     !heard.is_empty() && heard != preferred && heard.chars().count() <= 40 && valid_term(preferred)
 }
 
+// Extend a changed span to an explicitly selected term only if the added
+// context matches on both sides of the edit.
+fn selected_original<'a>(
+    original: &'a str,
+    edited: &str,
+    old: &[Range<usize>],
+    new: &[Range<usize>],
+    before: Range<usize>,
+    after: Range<usize>,
+    selection: &Range<usize>,
+) -> Option<&'a str> {
+    let first = new.iter().position(|word| word.start == selection.start)?;
+    let last = new.iter().position(|word| word.end == selection.end)? + 1;
+    let start = before.start.checked_sub(after.start.checked_sub(first)?)?;
+    let end = before.end + last.checked_sub(after.end)?;
+    let (start, end) = (old.get(start)?.start, old.get(end - 1)?.end);
+    let (changed_start, changed_end) = (old[before.start].start, old[before.end - 1].end);
+    if original[start..changed_start] != edited[selection.start..new[after.start].start]
+        || original[changed_end..end] != edited[new[after.end - 1].end..selection.end]
+    {
+        return None;
+    }
+    Some(&original[start..end])
+}
+
 pub(super) fn replacements(
     original: &str,
     edited: &str,
     selection: Option<Range<usize>>,
-) -> Vec<String> {
+) -> Vec<Replacement> {
     let old = tokens(original);
     let new = tokens(edited);
     if old.is_empty() || new.is_empty() {
@@ -127,8 +152,10 @@ pub(super) fn replacements(
     let standalone = (new.len() == 1
         && (old.len() == 1
             || (old.len() <= 4
-                && whole_new.contains(|c: char| c.is_ascii_uppercase())
-                && whole_old.chars().count() <= 14)))
+                && whole_old.chars().count() <= 14
+                && (whole_new.contains(|c: char| c.is_ascii_uppercase())
+                    || (whole_old.chars().all(han)
+                        && whole_new.contains(|c: char| c.is_ascii_alphabetic()))))))
         || (unchanged > 0
             && whole_old.chars().all(han)
             && whole_new.chars().all(han)
@@ -137,7 +164,7 @@ pub(super) fn replacements(
     // For an isolated Chinese name the boundaries are known even if only
     // the final character changes (e.g. 张为 -> 张伟).
     if selection.is_none() && standalone && candidate(whole_old, whole_new) {
-        return vec![whole_new.to_owned()];
+        return vec![Replacement::new(whole_old, whole_new)];
     }
     let local = unchanged > 0 && unchanged * 2 >= old.len().max(new.len());
     if !local && selection.is_none() {
@@ -148,19 +175,30 @@ pub(super) fn replacements(
         if before.is_empty() || after.is_empty() {
             return;
         }
-        let heard = span(original, &old[before]);
-        let preferred = if let Some(range) = selection
-            .as_ref()
-            .filter(|r| r.start <= new[after.start].start && r.end >= new[after.end - 1].end)
-        {
-            &edited[range.clone()]
+        let selected = selection.as_ref().and_then(|range| {
+            selected_original(
+                original,
+                edited,
+                &old,
+                &new,
+                before.clone(),
+                after.clone(),
+                range,
+            )
+            .map(|heard| (heard, &edited[range.clone()]))
+        });
+        let (heard, preferred) = if let Some(pair) = selected {
+            pair
         } else if local || standalone {
-            span(edited, &new[after])
+            (span(original, &old[before]), span(edited, &new[after]))
         } else {
             return;
         };
-        if candidate(heard, preferred) && !added.iter().any(|s| s == preferred) {
-            added.push(preferred.to_owned());
+        if candidate(heard, preferred) {
+            let rule = Replacement::new(heard, preferred);
+            if !added.contains(&rule) {
+                added.push(rule);
+            }
         }
     };
     let (mut i, mut j) = (0, 0);
@@ -186,6 +224,9 @@ pub(super) fn replacements(
 mod tests {
     fn replacements(original: &str, edited: &str) -> Vec<String> {
         super::replacements(original, edited, None)
+            .into_iter()
+            .map(|rule| rule.preferred)
+            .collect()
     }
     #[test]
     fn isolates_multiple_spelling_changes_in_mixed_dictation() {
@@ -225,7 +266,7 @@ mod tests {
         let selected = out.find("张伟").unwrap();
         assert_eq!(
             super::replacements(src, out, Some(selected..selected + "张伟".len())),
-            ["张伟"]
+            [super::Replacement::new("张为", "张伟")]
         );
         let unchanged = out.rfind("张伟").unwrap();
         assert!(

@@ -1,16 +1,13 @@
-//! A first recording, guided through the actual Speaky interface.
+//! First-run setup and a practice recording in the actual Speaky interface.
 mod card;
 mod effects;
 mod layout;
 mod motion;
 mod platform;
-pub(crate) async fn microphone_permission() -> bool {
-    platform::microphone_permission().await
-}
 
 use std::{
-    path::Path,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    time::Instant,
 };
 
 use gpui::{
@@ -19,64 +16,91 @@ use gpui::{
 };
 
 use crate::{
-    action, audio::AudioRecorder, config::Config, drafts, icons::Icon, is_silent_recording, Page,
-    RecordingStart, Speaky, ACCENT, BORDER, MUTED, SIDEBAR,
+    action, config::Config, drafts, icons::Icon, Page, RecordingDestination, RecordingStart,
+    Speaky, ACCENT, BORDER, MUTED, SIDEBAR,
 };
 
 pub(crate) use layout::Anchor;
 use layout::{Layout, CARD_WIDTH, WELCOME_WIDTH};
 use motion::{Clock, Frame, Scene};
+pub(crate) use platform::motion_allowed;
 
-// Preserve the previous launch preference. Everyone can replay from the sidebar.
+// Preserve the launch preference of existing profiles.
 const MARKER: &str = "onboarding-v1.done";
+
+pub(crate) async fn microphone_permission() -> bool {
+    platform::microphone_permission().await
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Step {
     Welcome,
-    Permissions,
     Shortcut,
-    Language,
-    Microphone,
-    Model,
+    Models,
+    Floating,
     Record,
-    Result,
-    Practice,
     Finish,
 }
 
-const STEPS: [Step; 10] = [
-    Step::Welcome,
-    Step::Permissions,
-    Step::Shortcut,
-    Step::Language,
-    Step::Microphone,
-    Step::Model,
-    Step::Record,
-    Step::Result,
-    Step::Practice,
-    Step::Finish,
-];
-
 impl Step {
+    const ALL: [Self; 6] = [
+        Self::Welcome,
+        Self::Shortcut,
+        Self::Models,
+        Self::Floating,
+        Self::Record,
+        Self::Finish,
+    ];
+
     fn page(self) -> Page {
         match self {
-            Self::Permissions | Self::Shortcut | Self::Language | Self::Microphone => {
-                Page::Settings
-            }
-            _ => Page::Home,
+            Self::Shortcut | Self::Floating => Page::Settings,
+            Self::Models => Page::Models,
+            Self::Welcome | Self::Record | Self::Finish => Page::Home,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Welcome => "欢迎",
+            Self::Shortcut => "听写快捷键",
+            Self::Models => "识别与改写",
+            Self::Floating => "桌面悬浮按钮",
+            Self::Record => "试说一句",
+            Self::Finish => "完成设置",
         }
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Microphone {
-    #[default]
-    Untested,
-    Checking,
-    Ready,
-    Quiet,
-    Unavailable,
-    Denied,
+pub(crate) struct PracticeResult {
+    original: String,
+    rewrite: Option<String>,
+    show_rewrite: bool,
+}
+
+impl PracticeResult {
+    fn new(original: String, rewrite: Option<String>) -> Self {
+        Self {
+            original,
+            show_rewrite: rewrite.is_some(),
+            rewrite,
+        }
+    }
+
+    fn text(&self) -> &str {
+        if let Some(rewrite) = self.rewrite.as_deref().filter(|_| self.show_rewrite) {
+            rewrite
+        } else {
+            &self.original
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PracticeIssue {
+    Microphone,
+    Model,
+    Transcription,
 }
 
 pub(crate) struct Tour {
@@ -86,13 +110,16 @@ pub(crate) struct Tour {
     frame: Frame,
     focus: FocusHandle,
     replay: FocusHandle,
-    microphone: Microphone,
-    microphone_check: u64,
-    pub(crate) record_issue: bool,
+    pub(crate) preparing: bool,
+    pub(crate) issue: Option<PracticeIssue>,
+    draft: Option<PathBuf>,
+    result: Option<PracticeResult>,
     pub(crate) copied: bool,
+    shortcut_waiting: bool,
+    shortcut_verified: bool,
     transition: u64,
-    leaving: bool,
-    model_rows: Option<Instant>,
+    #[cfg(windows)]
+    window: Option<isize>,
 }
 
 impl Tour {
@@ -106,13 +133,16 @@ impl Tour {
             frame: Frame::default(),
             focus: cx.focus_handle(),
             replay: cx.focus_handle(),
-            microphone: Microphone::Untested,
-            microphone_check: 0,
-            record_issue: false,
+            preparing: false,
+            issue: None,
+            draft: None,
+            result: None,
             copied: false,
+            shortcut_waiting: false,
+            shortcut_verified: false,
             transition: 0,
-            leaving: false,
-            model_rows: None,
+            #[cfg(windows)]
+            window: None,
         }
     }
 
@@ -124,6 +154,10 @@ impl Tour {
         self.step == Some(step)
     }
 
+    pub(crate) fn is_practice_draft(&self, draft: &Path) -> bool {
+        self.is_active() && self.draft.as_deref() == Some(draft)
+    }
+
     pub(crate) fn mark(&self, anchor: Anchor) -> Option<Canvas<()>> {
         self.is_active().then(|| self.layout.mark(anchor))
     }
@@ -132,29 +166,35 @@ impl Tour {
         self.is_active().then_some(&self.layout.scroll)
     }
 
-    pub(crate) fn docked(&mut self, viewport: Size<Pixels>) -> bool {
-        self.is_active() && !self.at(Step::Welcome) && self.layout.docked(viewport)
-    }
-
     pub(crate) fn request_reveal(&self) {
         self.layout.reveal();
     }
 
-    pub(crate) fn model_rows_arrived(&mut self) {
-        if self.at(Step::Model) {
-            self.model_rows = Some(Instant::now());
-            self.request_reveal();
-        }
-    }
-
-    pub(crate) fn model_row_motion(&self, index: usize) -> Option<(f32, Pixels)> {
-        if !self.at(Step::Model) || !self.frame.moving {
+    pub(crate) fn result_appearance(&self) -> Option<(f32, Pixels)> {
+        if self.practice_result().is_none() || self.frame.scene != Scene::Transcript {
             return None;
         }
-        let now = self.model_rows?.elapsed().as_secs_f32() * 1000.;
-        let delay = index.min(6) as f32 * 50.;
-        let t = motion::ease_out(motion::phase(now, delay, delay + 225.));
-        (t < 1.).then(|| (0.06 + 0.94 * t, px(7. * (1. - t))))
+        let reveal = self.frame.content();
+        (reveal < 1.).then(|| (0.45 + 0.55 * reveal, px(5. * (1. - reveal))))
+    }
+
+    pub(crate) fn practice_result(&self) -> Option<&str> {
+        self.result
+            .as_ref()
+            .filter(|_| self.at(Step::Record))
+            .map(PracticeResult::text)
+    }
+
+    pub(crate) fn has_rewrite(&self) -> bool {
+        self.result
+            .as_ref()
+            .is_some_and(|result| result.rewrite.is_some())
+    }
+
+    pub(crate) fn showing_rewrite(&self) -> bool {
+        self.result
+            .as_ref()
+            .is_some_and(|result| result.show_rewrite)
     }
 }
 
@@ -164,40 +204,62 @@ fn first_step(marker: &Path) -> Option<Step> {
 
 #[derive(Clone, Copy)]
 enum GuideAction {
-    Back,
     Next,
+    Back,
+    Finish,
     StopTour,
-    Locate,
-    CheckMicrophone,
+    Return,
+    KeepShortcut,
+    CaptureShortcut,
+    ModelTab(bool),
+    #[cfg(windows)]
+    Floating(bool),
     Privacy,
-    Shortcut,
-    Language(&'static str),
     #[cfg(target_os = "macos")]
     Accessibility,
+    Devices,
     Models,
-    #[cfg(any(windows, target_os = "macos"))]
-    Service,
     Record,
-    Copy,
-    History,
+    RetryTranscription,
+    OpenFeature(Page),
 }
 
 type GuideButton = (&'static str, GuideAction);
 
 impl Speaky {
     pub(crate) fn show_first_tour(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            self.tour.window = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(handle)) => Some(handle.hwnd.get()),
+                _ => None,
+            };
+        }
         if self.tour.is_active() {
-            self.show_tour_step(Step::Welcome, cx);
-            window.focus(&self.tour.focus);
+            self.restart_tour(window, cx);
         }
     }
 
+    pub(crate) fn tour_window_active(&self, _cx: &Context<Self>) -> bool {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            self.tour.window == Some(unsafe { GetForegroundWindow() } as isize)
+        }
+        #[cfg(not(windows))]
+        _cx.active_window()
+            .and_then(|window| window.downcast::<Self>())
+            .is_some()
+    }
+
     fn restart_tour(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tour.microphone_check = self.tour.microphone_check.wrapping_add(1);
-        self.tour.microphone = Microphone::Untested;
-        self.tour.record_issue = false;
-        self.tour.copied = false;
-        self.tour.leaving = false;
+        if (self.tour.is_active() && !self.tour.at(Step::Welcome))
+            || self.recording.is_some()
+            || self.starting
+        {
+            return;
+        }
         self.tour.layout.clear_camera();
         self.show_tour_step(Step::Welcome, cx);
         window.focus(&self.tour.focus);
@@ -207,80 +269,137 @@ impl Speaky {
         if self.tour.step.take().is_none() {
             return;
         }
-        self.tour.leaving = false;
-        self.tour.microphone_check = self.tour.microphone_check.wrapping_add(1);
+        self.tour.preparing = false;
+        self.tour.issue = None;
+        self.tour.draft = None;
+        self.tour.result = None;
+        self.tour.copied = false;
+        self.tour.shortcut_waiting = false;
+        self.tour.shortcut_verified = false;
+        self.tour.transition = self.tour.transition.wrapping_add(1);
         if let Err(error) = drafts::write_atomically(&Config::config_dir().join(MARKER), b"done\n")
         {
-            self.status = format!("无法保存引导进度：{error}");
+            self.set_feedback(Page::Home, format!("无法保存引导进度：{error}"));
         }
+        self.open_page(Page::Home, cx);
         window.focus(&self.tour.replay);
-        cx.notify();
     }
 
     pub(crate) fn show_tour_step(&mut self, step: Step, cx: &mut Context<Self>) {
+        if step == Step::Shortcut && !self.tour.at(Step::Shortcut) {
+            self.tour.shortcut_waiting = false;
+            self.tour.shortcut_verified = false;
+            self.clear_guide_shortcut_error();
+        }
+        if step == Step::Models && !self.tour.at(Step::Models) {
+            self.guide_show_model_tab(false, cx);
+        }
         self.tour.step = Some(step);
         self.tour.transition = self.tour.transition.wrapping_add(1);
         self.tour.layout.reset();
-        self.model_picker.close();
-        self.tour.model_rows = None;
-        if self.page != step.page() || step.page() == Page::Settings {
+        if self.page != step.page() {
             self.open_page(step.page(), cx);
         } else {
             cx.notify();
         }
-        if step == Step::Model {
-            self.toggle_model_picker(cx);
+    }
+
+    pub(crate) fn tour_shortcut_changed(&mut self) {
+        if self.tour.at(Step::Shortcut) {
+            self.tour.shortcut_waiting = true;
+            self.tour.shortcut_verified = false;
         }
     }
 
-    pub(crate) fn prepare_tour(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(step) = self.tour.step else {
-            return;
-        };
-        let now = Instant::now();
-        let moving = platform::motion_allowed();
-        let scene = if self.tour.leaving {
-            Scene::Exit
-        } else {
-            match step {
-                Step::Welcome => Scene::Welcome,
-                Step::Microphone | Step::Permissions => Scene::Microphone,
-                Step::Model | Step::Shortcut | Step::Language => Scene::Model,
-                Step::Record if self.recording.is_some() => Scene::Live,
-                Step::Record => Scene::Record,
-                Step::Result if self.page == Page::History => Scene::Archive,
-                Step::Result
-                    if self.page == Page::Home
-                        && moving
-                        && !self.transcribing
-                        && (self.tour.clock.scene() == Scene::HistoryLink
-                            || (self.tour.clock.scene() == Scene::Transcript
-                                && self.tour.clock.elapsed(now) >= 1450.)) =>
-                {
-                    Scene::HistoryLink
+    pub(crate) fn handle_tour_hotkey(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.tour.at(Step::Record) && self.guide_recording_in_progress() {
+            self.stop_recording(cx);
+            return true;
+        }
+        if !self.tour_window_active(cx) {
+            return false;
+        }
+        match self.tour.step {
+            Some(Step::Shortcut) if self.page == Page::Settings => {
+                if !self.guide_shortcut_capturing() && self.v30_registered_shortcut().is_some() {
+                    self.tour.shortcut_verified = true;
+                    self.tour.shortcut_waiting = false;
+                    cx.notify();
                 }
-                Step::Result => Scene::Transcript,
-                Step::Finish => Scene::Finish,
-                Step::Practice => Scene::Record,
+                true
             }
+            Some(Step::Record) if self.page == Page::Home => {
+                self.toggle_practice_recording(cx);
+                true
+            }
+            Some(Step::Welcome) => true,
+            _ => false,
+        }
+    }
+
+    fn guide_recording_in_progress(&self) -> bool {
+        self.recording
+            .as_ref()
+            .is_some_and(|recording| self.tour.is_practice_draft(&recording.draft))
+            || (self.starting && self.tour.draft.is_some())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn handle_tour_floating_click(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.tour.at(Step::Record) && self.guide_recording_in_progress() {
+            self.stop_recording(cx);
+            return true;
+        }
+        if self.tour.at(Step::Record) && self.page == Page::Home && self.tour_window_active(cx) {
+            self.toggle_practice_recording(cx);
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn prepare_tour(&mut self, window: &mut Window) -> bool {
+        let Some(step) = self.tour.step else {
+            return false;
         };
-        let old_scene = self.tour.frame.scene;
-        let frame = self
-            .tour
-            .clock
-            .frame(scene, step as usize, self.tour.transition, now, moving);
-        self.tour.frame = frame;
-        if old_scene != scene && matches!(scene, Scene::HistoryLink | Scene::Archive) {
+        let scene = match step {
+            Step::Welcome => Scene::Welcome,
+            Step::Shortcut if self.tour.shortcut_verified => Scene::ShortcutReady,
+            Step::Shortcut => Scene::Shortcut,
+            Step::Models if self.guide_model_ready() => Scene::ModelReady,
+            Step::Models => Scene::Model,
+            #[cfg(windows)]
+            Step::Floating
+                if self.tour_floating_status()
+                    == crate::floating_control::FloatingStatus::Visible =>
+            {
+                Scene::FloatingReady
+            }
+            Step::Floating => Scene::Floating,
+            Step::Record if self.page == Page::Settings => Scene::Microphone,
+            Step::Record if self.page == Page::Models => Scene::Model,
+            Step::Record if self.practice_result_ready() => Scene::Transcript,
+            Step::Record if self.transcribing => Scene::Processing,
+            Step::Record if self.recording.is_some() => Scene::Live,
+            Step::Record => Scene::Record,
+            Step::Finish => Scene::Finish,
+        };
+        if self.tour.frame.scene != scene {
             self.tour.request_reveal();
         }
-        if self.tour.leaving && !frame.animating() {
-            self.finish_tour(window, cx);
-            return;
-        }
-        let model_options_moving = self.tour.model_row_motion(6).is_some();
-        if frame.animating() || model_options_moving {
+        self.tour.frame = self.tour.clock.frame(
+            scene,
+            step as usize,
+            self.tour.transition,
+            Instant::now(),
+            motion_allowed(),
+        );
+        if self.tour.frame.animating() {
             window.request_animation_frame();
         }
+        step != Step::Welcome
+            && (self.tour.layout.docked(window.viewport_size())
+                || self.page == Page::Models
+                || (self.page != step.page() && self.page != Page::Settings))
     }
 
     fn run_guide_action(
@@ -293,81 +412,174 @@ impl Speaky {
         let Some(step) = self.tour.step else {
             return;
         };
-        // The previous frame can still receive a second click before it is replaced.
-        if epoch != self.tour.transition || self.tour.leaving {
+        if epoch != self.tour.transition {
             return;
         }
         match action {
-            GuideAction::Next if step == Step::Record && self.recording.is_some() => {
-                self.stop_recording(cx)
-            }
-            GuideAction::Back | GuideAction::Next => {
+            GuideAction::Next | GuideAction::Back => {
                 let index = step as usize;
                 let next = if matches!(action, GuideAction::Back) {
-                    STEPS[index.saturating_sub(1)]
-                } else if let Some(next) = STEPS.get(index + 1) {
-                    *next
+                    index.saturating_sub(1)
                 } else {
-                    if self.tour.frame.moving {
-                        self.tour.leaving = true;
-                        self.tour.transition = self.tour.transition.wrapping_add(1);
-                        cx.notify();
-                    } else {
-                        self.finish_tour(window, cx);
-                    }
-                    return;
+                    index + 1
                 };
-                self.show_tour_step(next, cx);
+                if let Some(next) = Step::ALL.get(next) {
+                    self.show_tour_step(*next, cx);
+                    window.focus(&self.tour.focus);
+                }
+            }
+            GuideAction::Finish | GuideAction::StopTour => {
+                if self.guide_recording_in_progress() {
+                    self.stop_recording(cx);
+                }
+                self.finish_tour(window, cx);
+            }
+            GuideAction::Return => {
+                self.open_page(step.page(), cx);
                 window.focus(&self.tour.focus);
             }
-            GuideAction::StopTour => self.finish_tour(window, cx),
-            GuideAction::Locate => self.show_tour_step(step, cx),
-            GuideAction::CheckMicrophone => self.check_tour_microphone(cx),
+            GuideAction::KeepShortcut => {
+                self.clear_guide_shortcut_error();
+                self.tour.shortcut_waiting = true;
+                cx.notify();
+            }
+            GuideAction::CaptureShortcut => self.begin_shortcut_capture(window, cx),
+            GuideAction::ModelTab(rewrite) => self.guide_show_model_tab(rewrite, cx),
+            #[cfg(windows)]
+            GuideAction::Floating(enabled) => self.set_tour_floating_button(enabled, cx),
             GuideAction::Privacy => cx.open_url(platform::MICROPHONE_SETTINGS),
-            GuideAction::Shortcut => self.open_shortcut_settings(window, cx),
-            GuideAction::Language(code) => self.guide_language(code, cx),
             #[cfg(target_os = "macos")]
             GuideAction::Accessibility => crate::mac_dictation::request_access(),
-            GuideAction::Models => self.toggle_model_picker(cx),
-            #[cfg(any(windows, target_os = "macos"))]
-            GuideAction::Service => self.open_service_settings(window, cx),
-            GuideAction::Record => self.toggle_recording(RecordingStart::Button, cx),
-            GuideAction::Copy => self.copy_recent_text(cx),
-            GuideAction::History => self.open_page(Page::History, cx),
+            GuideAction::Devices => self.open_page(Page::Settings, cx),
+            GuideAction::Models => {
+                self.redesign_config.rewrite = false;
+                self.open_page(Page::Models, cx);
+            }
+            GuideAction::Record => self.toggle_practice_recording(cx),
+            GuideAction::RetryTranscription => self.retry_practice_transcription(cx),
+            GuideAction::OpenFeature(page) => {
+                self.finish_tour(window, cx);
+                self.open_page(page, cx);
+            }
         }
     }
 
-    fn check_tour_microphone(&mut self, cx: &mut Context<Self>) {
-        if self.recording.is_some() || self.tour.microphone == Microphone::Checking {
+    pub(crate) fn practice_result_ready(&self) -> bool {
+        self.tour.practice_result().is_some()
+    }
+
+    pub(crate) fn show_practice_result(
+        &mut self,
+        path: &Path,
+        fallback: &str,
+        rewrite_completed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self.archive.iter().find(|entry| entry.path == path);
+        let original: &str = match entry.map(|entry| &entry.state) {
+            Some(drafts::State::Transcribed { text }) => text,
+            _ => fallback,
+        };
+        let rewrite = entry
+            .and_then(|entry| entry.organized.as_ref())
+            .filter(|value| rewrite_completed && value.source == original && value.text == fallback)
+            .map(|value| value.text.clone());
+        self.tour.result = Some(PracticeResult::new(original.to_owned(), rewrite));
+        self.tour.copied = false;
+        self.tour.request_reveal();
+        cx.notify();
+    }
+
+    pub(crate) fn select_practice_version(&mut self, rewrite: bool, cx: &mut Context<Self>) {
+        if let Some(result) = &mut self.tour.result {
+            result.show_rewrite = rewrite && result.rewrite.is_some();
+            self.tour.copied = false;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_practice_recording(&mut self, cx: &mut Context<Self>) {
+        if !self.tour.at(Step::Record) || self.page != Page::Home {
             return;
         }
-        self.tour.microphone = Microphone::Checking;
-        self.tour.microphone_check = self.tour.microphone_check.wrapping_add(1);
-        let check = self.tour.microphone_check;
+        if self.recording.is_some() || self.starting {
+            self.stop_recording(cx);
+            return;
+        }
+        if self.tour.preparing
+            || self.transcribing
+            || self.unsaved.is_some()
+            || self.diagnostics.checking
+            || self.recognition_model_busy()
+        {
+            return;
+        }
+        self.tour.preparing = true;
+        self.tour.issue = None;
+        self.tour.result = None;
+        self.tour.copied = false;
+        // A prior attempt's saved recording stays in history.
+        self.tour.draft = None;
+        self.clear_feedback(Page::Home);
+        let transition = self.tour.transition;
         cx.spawn(async move |entity, cx| {
-            let state = if platform::microphone_permission().await {
+            let readiness = if microphone_permission().await {
                 cx.background_spawn(async {
-                    match probe_microphone() {
-                        Ok(state) => state,
-                        Err(error) => {
-                            log::debug!("Guide microphone check: {error}");
-                            Microphone::Unavailable
-                        }
-                    }
+                    let config = Config::load().map_err(|error| error.to_string())?;
+                    crate::engines::recognition_engine(&config)
+                        .map(|_| crate::engines::uses_local_asr(&config))
                 })
                 .await
+                .map_err(|error| (PracticeIssue::Model, error))
             } else {
-                Microphone::Denied
+                Err((
+                    PracticeIssue::Microphone,
+                    "请在系统设置中允许 Speaky 访问麦克风。".into(),
+                ))
             };
             let _ = entity.update(cx, |view, cx| {
-                if view.tour.microphone_check == check {
-                    view.tour.microphone = state;
-                    cx.notify();
+                if view.tour.transition != transition {
+                    return;
                 }
+                view.tour.preparing = false;
+                match readiness {
+                    Ok(local)
+                        if view.page == Page::Home
+                            && view.recording.is_none()
+                            && !view.starting
+                            && !view.transcribing
+                            && view.unsaved.is_none()
+                            && !view.recognition_model_busy() =>
+                    {
+                        if local {
+                            view.model_picker.note_model_loaded();
+                        }
+                        let draft = drafts::new_path();
+                        view.tour.draft = Some(draft.clone());
+                        view.begin_recording(draft, RecordingStart::Button, cx);
+                    }
+                    Ok(_) => {}
+                    Err((issue, error)) => {
+                        view.set_feedback(Page::Home, error);
+                        view.tour.issue = Some(issue);
+                        view.tour.request_reveal();
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    fn retry_practice_transcription(&mut self, cx: &mut Context<Self>) {
+        if !self.tour.at(Step::Record) || self.tour.issue != Some(PracticeIssue::Transcription) {
+            return;
+        }
+        let Some(draft) = self.tour.draft.clone() else {
+            return;
+        };
+        self.transcribe(draft, RecordingDestination::Archive, cx);
     }
 
     pub(crate) fn tour_entry(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -378,14 +590,14 @@ impl Speaky {
             .justify_start()
             .px_2()
             .gap_1p5()
-            .bg(rgb(SIDEBAR))
-            .text_color(rgb(MUTED))
-            .child(Icon::Guide.render(ACCENT))
+            .bg(rgb(SIDEBAR()))
+            .text_color(rgb(MUTED()))
+            .child(Icon::Guide.render(ACCENT()))
             .child("进入引导")
             .when(!self.tour.is_active(), |row| {
                 row.track_focus(&self.tour.replay)
                     .tab_stop(true)
-                    .focus(|row| row.border_1().border_color(rgb(ACCENT)))
+                    .focus(|row| row.border_1().border_color(rgb(ACCENT())))
             })
             .on_click(cx.listener(|view, _, window, cx| view.restart_tour(window, cx)))
     }
@@ -397,19 +609,15 @@ impl Speaky {
                 .relative()
                 .flex_none()
                 .w_full()
-                .px_5()
-                .pt_2()
-                .pb_2()
-                .bg(rgb(0xe2ebe3))
-                .when(self.tour.leaving, |dock| {
-                    dock.opacity(1. - self.tour.frame.card())
-                })
+                .px_4()
+                .py_2()
+                .bg(rgb(crate::RAIL()))
                 .border_t_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(BORDER()))
                 .child(self.story_card(
                     step,
-                    (viewport.width - px(204.)).min(px(553.)),
-                    Some(viewport.height * 0.50),
+                    (viewport.width - px(270.)).clamp(px(270.), px(550.)),
+                    Some((viewport.height * 0.46).max(px(160.))),
                     cx,
                 ))
                 .children(self.tour.mark(Anchor::Dock)),
@@ -418,61 +626,55 @@ impl Speaky {
 
     pub(crate) fn tour_overlay(
         &self,
+        viewport: Size<Pixels>,
         docked: bool,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let step = self.tour.step?;
         let frame = self.tour.frame;
-        let (primary, companion) = match frame.scene {
-            Scene::Welcome | Scene::Finish | Scene::Exit => (Anchor::Workspace, None),
-            Scene::Microphone => (Anchor::Input, None),
-            Scene::Model if self.tour.at(Step::Shortcut) => (Anchor::Shortcut, None),
-            Scene::Model if self.tour.at(Step::Language) => (Anchor::Language, None),
-            Scene::Model if self.page == Page::Settings => (Anchor::Service, None),
-            Scene::Model => (Anchor::Model, None),
-            Scene::Record => (Anchor::Record, None),
-            Scene::Live if docked => (Anchor::Transcript, Some(Anchor::Record)),
-            Scene::Live => (Anchor::Record, Some(Anchor::Transcript)),
-            Scene::Transcript => (Anchor::Transcript, None),
-            Scene::HistoryLink => (Anchor::HistoryLink, Some(Anchor::Transcript)),
-            Scene::Archive => (Anchor::History, None),
+        let (primary, companion, extra) = match frame.scene {
+            Scene::Welcome => (Anchor::Workspace, None, None),
+            Scene::Shortcut | Scene::ShortcutReady => (Anchor::Shortcut, None, None),
+            Scene::Microphone => (Anchor::Input, None, None),
+            Scene::Model | Scene::ModelReady if self.redesign_config.rewrite => {
+                (Anchor::Rewrite, Some(Anchor::Model), None)
+            }
+            Scene::Model | Scene::ModelReady => (
+                Anchor::Model,
+                Some(Anchor::ModelChoice),
+                Some(Anchor::Rewrite),
+            ),
+            Scene::Floating | Scene::FloatingReady => (Anchor::Floating, None, None),
+            Scene::Record if self.tour.issue == Some(PracticeIssue::Transcription) => {
+                (Anchor::Transcript, Some(Anchor::Record), None)
+            }
+            Scene::Record => (Anchor::RecordButton, Some(Anchor::Shortcut), None),
+            Scene::Live => (
+                Anchor::RecordButton,
+                Some(Anchor::Transcript),
+                Some(Anchor::Record),
+            ),
+            Scene::Processing | Scene::Transcript => (Anchor::Transcript, None, None),
+            Scene::Finish => (
+                Anchor::HistoryLink,
+                Some(Anchor::TermsLink),
+                Some(Anchor::FilesLink),
+            ),
         };
         let width = if step == Step::Welcome {
-            WELCOME_WIDTH
+            WELCOME_WIDTH.min(viewport.width - px(32.))
         } else {
             CARD_WIDTH
         };
-        let allow_history = step == Step::Result && self.page == Page::Home && !frame.moving;
         Some(self.tour.layout.spotlight(
             frame,
             primary,
             companion,
-            allow_history,
-            self.unsaved.is_some()
-                || (step == Step::Record && self.tour.record_issue)
-                || (step == Step::Result && self.playback.is_some()),
+            extra,
+            self.unsaved.is_some() || self.tour.issue.is_some(),
             (!docked).then(|| self.story_card(step, width, None, cx)),
         ))
     }
-}
-
-fn probe_microphone() -> Result<Microphone, String> {
-    let input = Config::load().map_err(|error| error.to_string())?.core.asr;
-    let mut recorder = AudioRecorder::new_with_name(
-        input.audio_device,
-        input.audio_device_name.as_deref(),
-        input.audio_gain,
-    )?;
-    recorder.start()?;
-    std::thread::sleep(Duration::from_millis(1600));
-    let wav = recorder.stop();
-    Ok(if wav.is_empty() {
-        Microphone::Unavailable
-    } else if is_silent_recording(&wav) {
-        Microphone::Quiet
-    } else {
-        Microphone::Ready
-    })
 }
 
 #[cfg(test)]

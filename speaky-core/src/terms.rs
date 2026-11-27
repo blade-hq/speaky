@@ -7,6 +7,11 @@ use std::{
 
 #[path = "learned_terms.rs"]
 mod learned_terms;
+#[path = "replacement_rules.rs"]
+mod replacement_rules;
+pub use replacement_rules::{
+    add_replacements, suggest_replacements, undo_replacements, Replacement, ReplacementUndo,
+};
 
 fn lock_dictionary(directory: &Path) -> io::Result<fs::File> {
     fs::create_dir_all(directory)?;
@@ -30,7 +35,11 @@ fn vocabulary_path() -> PathBuf {
 }
 
 pub fn load() -> io::Result<String> {
-    match fs::read_to_string(vocabulary_path()) {
+    read_vocabulary(&vocabulary_path())
+}
+
+fn read_vocabulary(path: &Path) -> io::Result<String> {
+    match fs::read_to_string(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
         result => result,
     }
@@ -77,7 +86,10 @@ pub fn learn_edits_with_selection(
     edited: &str,
     selection: Option<Range<usize>>,
 ) -> io::Result<Vec<String>> {
-    let changes = learned_terms::replacements(original, edited, selection);
+    let changes = learned_terms::replacements(original, edited, selection)
+        .into_iter()
+        .map(|rule| rule.preferred)
+        .collect::<Vec<_>>();
     if changes.is_empty() {
         return Ok(changes);
     }

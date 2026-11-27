@@ -8,6 +8,7 @@ default = []
 local-packs = ["dep:sha2", "dep:tempfile", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Diagnostics_ToolHelp"]
 
 [dependencies]
+base64 = "0.22"
 byteorder = "1"
 cpal = "0.16"
 flate2 = "1"
@@ -32,6 +33,7 @@ windows = { version = "0.61.3", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_UI_Accessibility",

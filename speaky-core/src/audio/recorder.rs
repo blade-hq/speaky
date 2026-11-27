@@ -1,6 +1,6 @@
 use super::meter::{self, VoiceActivity, WINDOW_SAMPLES};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use cpal::{Device, Host, SampleFormat, Stream, StreamConfig};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -129,9 +129,70 @@ impl AreaResampler {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct InputDevices {
+    available: Vec<(u32, String)>,
+    default_name: Option<String>,
+}
+
+impl InputDevices {
+    pub fn discover() -> Self {
+        let host = cpal::default_host();
+        Self::from_devices(&input_devices(&host), host.default_input_device().as_ref())
+    }
+
+    fn from_devices(devices: &[Device], default: Option<&Device>) -> Self {
+        let available = devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let name = device.name().unwrap_or_else(|_| format!("Device {index}"));
+                (index as u32, name)
+            })
+            .collect();
+        let default_name =
+            default.map(|device| device.name().unwrap_or_else(|_| "系统默认麦克风".into()));
+        Self {
+            available,
+            default_name,
+        }
+    }
+
+    pub fn available(&self) -> &[(u32, String)] {
+        &self.available
+    }
+
+    fn configured(&self, index: Option<u32>, name: Option<&str>) -> Option<&(u32, String)> {
+        // Only use the index for older profiles with no saved device name.
+        // Unplugging a named device can assign its old index to another device.
+        self.available.iter().find(|(id, label)| match name {
+            Some(name) => name == label,
+            None => index == Some(*id),
+        })
+    }
+
+    pub fn configured_name(&self, index: Option<u32>, name: Option<&str>) -> Option<&str> {
+        self.configured(index, name)
+            .map(|(_, label)| label.as_str())
+    }
+
+    pub fn preferred_name(&self, index: Option<u32>, name: Option<&str>) -> Option<&str> {
+        self.configured_name(index, name)
+            .or(self.default_name.as_deref())
+            .or_else(|| self.available.last().map(|(_, label)| label.as_str()))
+    }
+}
+
+fn input_devices(host: &Host) -> Vec<Device> {
+    host.input_devices()
+        .map(|devices| devices.collect())
+        .unwrap_or_default()
+}
+
 /// Audio recorder using cpal for cross-platform support
 pub struct AudioRecorder {
     device: Option<Device>,
+    opened_input_name: Option<String>,
     stream: Mutex<StreamHandle>,
     frames: Arc<Mutex<Vec<i16>>>,
     is_recording: Arc<AtomicBool>,
@@ -163,35 +224,17 @@ impl AudioRecorder {
     ) -> Result<Self, String> {
         let host = cpal::default_host();
 
-        // Device enumeration can change while a USB microphone is being
-        // reconnected. Keep a valid configured device when possible, but do
-        // not leave the recorder unusable when the saved index is stale.
-        let mut enumerated = host
-            .input_devices()
-            .map(|devices| devices.collect::<Vec<_>>())
-            .unwrap_or_default();
-        let named = device_name.and_then(|name| {
-            enumerated
-                .iter()
-                .find(|device| device.name().ok().as_deref() == Some(name))
-                .cloned()
-        });
-        let device = if named.is_some() {
-            named
-        } else if let Some(index) = device_index {
-            let selected = enumerated.get(index as usize).cloned();
-            if selected.is_none() {
-                warn!(
-                    "Configured audio device index {} is unavailable; falling back to the default input",
-                    index
-                );
-            }
-            selected
-                .or_else(|| host.default_input_device())
-                .or_else(|| enumerated.pop())
-        } else {
-            host.default_input_device().or_else(|| enumerated.pop())
-        };
+        let mut enumerated = input_devices(&host);
+        let default = host.default_input_device();
+        let inputs = InputDevices::from_devices(&enumerated, default.as_ref());
+        let configured = inputs.configured(device_index, device_name);
+        if configured.is_none() && (device_name.is_some() || device_index.is_some()) {
+            warn!("Configured audio input is unavailable; falling back to the default input");
+        }
+        let device = configured
+            .and_then(|(index, _)| enumerated.get(*index as usize).cloned())
+            .or(default)
+            .or_else(|| enumerated.pop());
 
         let clamped_gain = gain.clamp(0.1, 5.0);
         if device.is_none() {
@@ -205,6 +248,7 @@ impl AudioRecorder {
 
         Ok(Self {
             device,
+            opened_input_name: None,
             stream: Mutex::new(StreamHandle(None)),
             // Pre-allocate with capacity to reduce reallocations during recording
             frames: Arc::new(Mutex::new(Vec::with_capacity(SAMPLE_RATE as usize * 60))), // 1 minute max
@@ -220,18 +264,12 @@ impl AudioRecorder {
     /// # Returns
     /// Vector of tuples containing (device_index, device_name)
     pub fn get_devices() -> Vec<(u32, String)> {
-        let host = cpal::default_host();
-        let mut devices = Vec::new();
+        InputDevices::discover().available
+    }
 
-        if let Ok(input_devices) = host.input_devices() {
-            for (i, device) in input_devices.enumerate() {
-                let name = device.name().unwrap_or_else(|_| format!("Device {}", i));
-                devices.push((i as u32, name));
-            }
-        }
-
-        debug!("Found {} audio input devices", devices.len());
-        devices
+    /// Name of the input that supplied audio when the last stream was opened.
+    pub fn opened_input_name(&self) -> Option<&str> {
+        self.opened_input_name.as_deref()
     }
 
     /// Set the audio level callback
@@ -270,7 +308,7 @@ impl AudioRecorder {
         self.start_with_frames(Self::recorded_frames(wav)?)
     }
 
-    fn recorded_frames(wav: &[u8]) -> Result<Vec<i16>, String> {
+    pub fn recorded_frames(wav: &[u8]) -> Result<Vec<i16>, String> {
         let payload = wav.get(44..).filter(|payload| {
             wav.starts_with(b"RIFF")
                 && wav.get(8..16) == Some(b"WAVEfmt ")
@@ -294,6 +332,7 @@ impl AudioRecorder {
         }
 
         let saved_samples = initial_frames.len();
+        self.opened_input_name = None;
         *self.frames.lock() = initial_frames;
         self.is_recording.store(true, Ordering::SeqCst);
 
@@ -312,7 +351,9 @@ impl AudioRecorder {
         if let Some(device) = self.device.take() {
             candidates.push(device);
         }
-        if let Ok(devices) = cpal::default_host().input_devices() {
+        let host = cpal::default_host();
+        candidates.extend(host.default_input_device());
+        if let Ok(devices) = host.input_devices() {
             candidates.extend(devices);
         }
 
@@ -344,9 +385,8 @@ impl AudioRecorder {
 
         let mut last_error = None;
         for device in candidates {
-            let device_name = device
-                .name()
-                .unwrap_or_else(|_| "unknown device".to_string());
+            let name = device.name().ok();
+            let device_name = name.as_deref().unwrap_or("unknown device");
             let supported = match device.default_input_config() {
                 Ok(config) => config,
                 Err(error) => {
@@ -434,6 +474,7 @@ impl AudioRecorder {
             }
 
             info!("Recording started successfully on '{}'", device_name);
+            self.opened_input_name = name;
             self.device = Some(device);
             self.stream.lock().0 = Some(stream);
             return Ok(());
@@ -673,7 +714,31 @@ impl Drop for AudioRecorder {
 
 #[cfg(test)]
 mod tests {
-    use super::{AreaResampler, AudioRecorder, SAMPLE_RATE};
+    use super::{AreaResampler, AudioRecorder, InputDevices, SAMPLE_RATE};
+
+    #[test]
+    fn disconnected_named_input_falls_back_to_default_even_if_its_old_index_exists() {
+        let mut inputs = InputDevices {
+            available: vec![(0, "USB mic".into()), (1, "Built-in mic".into())],
+            default_name: Some("Built-in mic".into()),
+        };
+        assert_eq!(inputs.configured_name(Some(0), Some("Headset")), None);
+        assert_eq!(
+            inputs.preferred_name(Some(0), Some("Headset")),
+            Some("Built-in mic")
+        );
+        assert_eq!(inputs.preferred_name(Some(0), None), Some("USB mic"));
+
+        inputs.available.push((2, "Headset".into()));
+        assert_eq!(
+            inputs.preferred_name(Some(0), Some("Headset")),
+            Some("Headset")
+        );
+        assert_eq!(
+            InputDevices::default().preferred_name(None, Some("Headset")),
+            None
+        );
+    }
 
     #[test]
     fn resumes_saved_pcm_without_losing_samples() {

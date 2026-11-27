@@ -223,8 +223,10 @@ def _child(pipe, name, directory, gpu, preview_cancelled):
 
 
 class Worker:
-    def __init__(self, name, directory):
+    def __init__(self, name, directory, cancelled=None):
+        check_load(cancelled)
         gpu = _target()
+        check_load(cancelled)
         self.name = name
         self.gpu = gpu
         self.info = {}
@@ -241,15 +243,23 @@ class Worker:
             self.job.assign(self.process)
             child_pipe.close()
             self.pipe.send("load")
-            self.info = self._receive(240)
+            self.info = self._receive(240, cancelled)
         except BaseException:
             child_pipe.close()
             self.stop()
             raise
 
-    def _receive(self, timeout):
-        if not self.pipe.poll(timeout):
-            raise TimeoutError(f"等待 {self.name} 的 GPU 响应超时。")
+    def _receive(self, timeout, cancelled=None):
+        deadline = time.monotonic() + timeout
+        while True:
+            check_load(cancelled)
+            remaining = max(0, deadline - time.monotonic())
+            interval = remaining if cancelled is None else min(remaining, 0.1)
+            if self.pipe.poll(interval):
+                check_load(cancelled)
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"等待 {self.name} 的 GPU 响应超时。")
         try:
             ok, value = self.pipe.recv()
         except (EOFError, OSError) as error:
@@ -282,3 +292,12 @@ class Worker:
             return next(row[3] for row in _gpus() if row[1] == self.gpu[1])
         except (OSError, ValueError, StopIteration, subprocess.SubprocessError):
             return None
+
+
+class LoadCancelled(Exception):
+    pass
+
+
+def check_load(cancelled):
+    if cancelled is not None and cancelled():
+        raise LoadCancelled("已停止加载模型。")

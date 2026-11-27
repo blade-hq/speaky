@@ -5333,6 +5333,7 @@ dependencies = [
 name = "speaky-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "byteorder",
  "cpal",
  "flate2",

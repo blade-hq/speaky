@@ -1,4 +1,5 @@
 use crate::audio::VoiceActivity;
+use crate::theme;
 #[cfg(windows)]
 use crate::windows_floating::{self, Position, WindowDrag};
 use gpui::{
@@ -10,7 +11,6 @@ use std::{rc::Rc, time::Instant};
 mod wave;
 use speaky_core::wave::VoiceWave;
 
-const ACCENT: u32 = 0x9eaaff;
 const CORNER_RADIUS: f32 = 20.;
 #[cfg(windows)]
 const POSITION_FILE: &str = "caption-position.json";
@@ -25,6 +25,8 @@ pub(super) struct RecordingOverlay {
     caption: String,
     on_finish: Rc<dyn Fn(&mut App)>,
     on_cancel: Rc<dyn Fn(&mut App)>,
+    #[cfg(target_os = "macos")]
+    native_theme: Option<theme::Theme>,
     #[cfg(windows)]
     drag: Rc<WindowDrag>,
 }
@@ -34,6 +36,7 @@ impl RecordingOverlay {
         cx: &mut App,
         show_controls: bool,
         show_caption: bool,
+        starting: bool,
         on_finish: impl Fn(&mut App) + 'static,
         on_cancel: impl Fn(&mut App) + 'static,
     ) -> Result<WindowHandle<Self>, String> {
@@ -99,13 +102,17 @@ impl RecordingOverlay {
                         wave: VoiceWave::default(),
                         show_controls,
                         show_caption,
-                        caption: if show_caption {
+                        caption: if starting {
+                            "准备录音…".into()
+                        } else if show_caption {
                             "正在聆听…".into()
                         } else {
                             String::new()
                         },
                         on_finish: Rc::new(on_finish),
                         on_cancel: Rc::new(on_cancel),
+                        #[cfg(target_os = "macos")]
+                        native_theme: None,
                         #[cfg(windows)]
                         drag,
                     })
@@ -126,6 +133,17 @@ impl RecordingOverlay {
             .detach();
         }
         Ok(handle)
+    }
+
+    pub(super) fn recording_started(&mut self, cx: &mut Context<Self>) {
+        self.started_at = Instant::now();
+        self.elapsed_seconds = 0;
+        self.caption = if self.show_caption {
+            "等待语音…".into()
+        } else {
+            String::new()
+        };
+        cx.notify();
     }
 
     pub(super) fn push_activity(
@@ -167,16 +185,23 @@ impl Render for StopTooltip {
             .py_0p5()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x46506b))
-            .bg(rgb(0x252c40))
-            .text_color(rgb(0xeff2ff))
+            .border_color(rgb(theme::border()))
+            .bg(rgb(theme::surface()))
+            .text_color(rgb(theme::ink()))
             .text_xs()
             .child("停止并保存")
     }
 }
 
 impl Render for RecordingOverlay {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        if self.native_theme != Some(theme::current()) {
+            apply_native_theme(window);
+            self.native_theme = Some(theme::current());
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = window;
         let seconds = self.elapsed_seconds;
         let timer = format!("{:02}:{:02}", seconds / 60, seconds % 60);
         let on_finish = self.on_finish.clone();
@@ -201,8 +226,8 @@ impl Render for RecordingOverlay {
                     .justify_center()
                     .cursor_pointer()
                     .rounded_full()
-                    .hover(|s| s.bg(rgba(0xffffff20)))
-                    .child(crate::icons::Icon::Close.render(0xc4cce3))
+                    .hover(|s| s.bg(rgba(theme::rgba(theme::ink(), 0x12))))
+                    .child(crate::icons::Icon::Close.render(theme::muted()))
                     .on_click(move |_, _, cx| {
                         #[cfg(windows)]
                         if cancel_drag.did_drag() {
@@ -217,8 +242,8 @@ impl Render for RecordingOverlay {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(6.)).rounded_full().bg(rgb(ACCENT)))
-                    .child(div().text_xs().text_color(rgb(0xc4cce3)).child(timer)),
+                    .child(div().size(px(6.)).rounded_full().bg(rgb(theme::accent())))
+                    .child(div().text_xs().text_color(rgb(theme::muted())).child(timer)),
             )
             .child(div().flex_1().min_w(px(0.)).child(wave::element(self.wave)))
             .child(
@@ -231,9 +256,9 @@ impl Render for RecordingOverlay {
                     .justify_center()
                     .cursor_pointer()
                     .rounded_full()
-                    .bg(rgba(0x9eaaff26))
-                    .hover(|style| style.bg(rgba(0x9eaaff40)))
-                    .child(crate::icons::Icon::Check.render(0xeff2ff))
+                    .bg(rgb(theme::accent()))
+                    .hover(|style| style.bg(rgb(theme::choose(0x7c9aff, 0x1f473a))))
+                    .child(crate::icons::Icon::Check.render(theme::accent_ink()))
                     .tooltip(|_, cx| cx.new(|_| StopTooltip).into())
                     .on_click(move |_, _, cx| {
                         #[cfg(windows)]
@@ -257,8 +282,8 @@ impl Render for RecordingOverlay {
             .overflow_hidden()
             .rounded(px(CORNER_RADIUS))
             .border_1()
-            .border_color(rgba(0xa6b7ff3c))
-            .bg(rgba(0x181c28f0))
+            .border_color(rgb(theme::border()))
+            .bg(rgba(theme::rgba(theme::background(), 0xf5)))
             .when(cfg!(windows), |panel| panel.cursor_grab())
             .when(self.show_caption, |panel| {
                 panel.child(
@@ -276,7 +301,7 @@ impl Render for RecordingOverlay {
                                 .flex_none()
                                 .text_size(px(15.))
                                 .line_height(px(21.))
-                                .text_color(rgb(0xeff2ff))
+                                .text_color(rgb(theme::ink()))
                                 .child(self.caption.clone()),
                         ),
                 )
@@ -303,7 +328,6 @@ pub(super) fn show_panel(
     use windows::Win32::{
         Foundation::POINT,
         Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL},
-        UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
     };
 
     let monitor = windows_floating::active_monitor();
@@ -319,15 +343,7 @@ pub(super) fn show_panel(
         });
     let work =
         windows_floating::monitor_work_area(monitor).ok_or("无法取得字幕悬浮窗的工作区。")?;
-    let (mut dpi_x, mut dpi_y) = (0, 0);
-    let scale = if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
-        .is_ok()
-        && dpi_x != 0
-    {
-        dpi_x as f32 / 96.
-    } else {
-        window.scale_factor()
-    };
+    let scale = windows_floating::monitor_scale(monitor, window.scale_factor());
     let device_px = |length: Pixels| (f32::from(length) * scale).round() as i32;
     let width = device_px(bounds.size.width).min(work.right - work.left);
     let height = device_px(bounds.size.height).min(work.bottom - work.top);
@@ -380,12 +396,9 @@ pub(super) fn show_panel(
         let _: () = msg_send![effect, setBlendingMode: BEHIND_WINDOW];
         let _: () = msg_send![effect, setState: EFFECT_ACTIVE];
         let _: () = msg_send![effect, setAutoresizingMask: VIEW_SIZABLE];
-        let dark_aqua: *mut Object = msg_send![
-            class!(NSString),
-            stringWithUTF8String: c"NSAppearanceNameDarkAqua".as_ptr()
-        ];
-        let appearance: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: dark_aqua];
-        let _: () = msg_send![effect, setAppearance: appearance];
+        // Inherit the panel appearance so existing visual effects also follow
+        // a theme change without replacing the native view.
+        apply_native_theme(window);
         let _: () = msg_send![effect, setWantsLayer: YES];
         let layer: *mut Object = msg_send![effect, layer];
         let _: () = msg_send![layer, setCornerRadius: f64::from(CORNER_RADIUS)];
@@ -466,4 +479,32 @@ pub(super) fn show_panel(
         let _: () = msg_send![panel, orderFrontRegardless];
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+pub(super) fn apply_native_theme(window: &Window) {
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view = handle.ns_view.cast::<Object>().as_ptr();
+    let name = match theme::current() {
+        theme::Theme::Dark => c"NSAppearanceNameDarkAqua",
+        theme::Theme::Light => c"NSAppearanceNameAqua",
+    };
+    unsafe {
+        let panel: *mut Object = msg_send![view, window];
+        if panel.is_null() {
+            return;
+        }
+        let name: *mut Object = msg_send![class!(NSString), stringWithUTF8String: name.as_ptr()];
+        let appearance: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: name];
+        let _: () = msg_send![panel, setAppearance: appearance];
+    }
 }

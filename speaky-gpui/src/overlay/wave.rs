@@ -1,3 +1,4 @@
+use crate::theme;
 use gpui::{canvas, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, PathBuilder};
 use speaky_core::wave::{VoiceWave, COLORS};
 
@@ -5,13 +6,18 @@ pub(super) fn element(wave: VoiceWave) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
+            let colors = if theme::current() == theme::Theme::Light {
+                [0x247a70, 0x356a95, 0x7650a0, 0xa83f75, 0xa56528]
+            } else {
+                COLORS
+            };
             for echo in [true, false] {
                 let Some(curve) =
                     wave.sample(bounds.size.width.into(), bounds.size.height.into(), echo)
                 else {
                     continue;
                 };
-                for (points, colors) in curve.spans.iter().zip(COLORS.windows(2)) {
+                for (points, colors) in curve.spans.iter().zip(colors.windows(2)) {
                     let mut path = PathBuilder::stroke(px(curve.thickness));
                     let mut points = points
                         .iter()

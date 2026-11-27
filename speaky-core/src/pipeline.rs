@@ -1,22 +1,21 @@
 //! The final ASR -> durable original -> optional rewrite sequence shared by both clients.
-use crate::{config::Config, drafts, engines, history, polish, polish_preferences, session, terms};
-use serde::{Deserialize, Serialize};
+use crate::{config::Config, drafts, engines, history, polish, session, terms};
 use std::path::Path;
+
+pub const NO_RECOGNIZED_TEXT: &str = "未识别到文字。";
 
 pub struct Transcript {
     pub text: String,
     pub notice: String,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct RewriteDebug {
-    pub model: String,
-    pub system: String,
-    pub input: String,
-    pub error: Option<String>,
+pub fn transcribe_saved(config: &Config, path: &Path) -> Result<Transcript, String> {
+    let source = transcribe_original(config, path)?;
+    Ok(rewrite_saved(config, path, source))
 }
 
-pub fn transcribe_saved(config: &Config, path: &Path) -> Result<Transcript, String> {
+/// Decode the complete recording and save its original before any optional rewrite.
+pub fn transcribe_original(config: &Config, path: &Path) -> Result<String, String> {
     let wav = std::fs::read(path).map_err(|e| e.to_string())?;
     if session::is_silent_recording(&wav) {
         return Err(session::SILENT_INPUT.into());
@@ -30,11 +29,11 @@ pub fn transcribe_saved(config: &Config, path: &Path) -> Result<Transcript, Stri
     )
     .map_err(|e| e.to_string())?;
     if source.trim().is_empty() {
-        return Err("未识别到文字。".into());
+        return Err(NO_RECOGNIZED_TEXT.into());
     }
     // Do not call the LLM or inject text until the ASR original is durable.
     history::record(path, &source, engine.name()).map_err(|e| format!("保存转写结果失败：{e}"))?;
-    Ok(rewrite_saved(config, path, source))
+    Ok(source)
 }
 
 pub fn rewrite_saved(config: &Config, path: &Path, source: String) -> Transcript {
@@ -61,39 +60,17 @@ pub fn organize_saved(
     path: &Path,
     source: &str,
 ) -> Result<drafts::Organized, String> {
-    let profile = if !config.llm.custom_prompt.trim().is_empty() {
-        None
-    } else if config.llm.learns_preferences() {
-        Some(polish_preferences::load(&config.llm.openai)?.next_candidate())
-    } else {
-        Some(polish::Profile::Balanced)
-    };
+    let profile = config
+        .llm
+        .custom_prompt
+        .trim()
+        .is_empty()
+        .then_some(polish::Profile::Balanced);
     let prompt = profile.map_or_else(|| config.llm.custom_prompt.clone(), polish::Profile::prompt);
-    let settings = &config.llm.openai;
-    let result = polish::organize_with_prompt(settings, &prompt, source);
-    if config.desktop.debug_mode {
-        // Only these request fields are persisted; never serialize the service settings/headers.
-        let redact = |value: &str| {
-            let key = settings.api_key.trim();
-            if key.is_empty() {
-                value.to_owned()
-            } else {
-                value.replace(key, "[REDACTED]")
-            }
-        };
-        let debug = RewriteDebug {
-            model: redact(settings.model.trim()),
-            system: redact(&prompt),
-            input: redact(source),
-            error: result.as_ref().err().map(|e| redact(e)),
-        };
-        let bytes = serde_json::to_vec_pretty(&debug).map_err(|e| e.to_string())?;
-        drafts::write_atomically(&path.with_extension("debug.json"), &bytes)
-            .map_err(|e| format!("保存调试记录失败：{e}"))?;
-    }
+    let settings = config.llm.organizer_service();
     let organized = drafts::Organized {
         source: source.into(),
-        text: result?,
+        text: polish::organize_with_prompt(&settings, &prompt, source)?,
         base_url: settings.base_url.clone(),
         model: settings.model.clone(),
         profile,
@@ -107,7 +84,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn successful_rewrite_saves_three_independent_artifacts_and_redacted_debug() {
+    fn successful_rewrite_preserves_audio_and_original_without_legacy_debug() {
         use std::{
             io::{BufRead, BufReader, Read, Write},
             net::TcpListener,
@@ -125,6 +102,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut config = Config::default();
         config.llm.enabled = true;
+        config.llm.learn_preferences = true;
         config.desktop.debug_mode = true;
         config.llm.openai.base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         config.llm.openai.model = "test-rewriter".into();
@@ -156,6 +134,10 @@ mod tests {
             reader.read_exact(&mut body).unwrap();
             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(request["model"], "test-rewriter");
+            assert_eq!(
+                request["messages"][0]["content"],
+                polish::Profile::Balanced.prompt()
+            );
             assert_eq!(request["messages"][1]["content"], "明天下午两点开会");
             assert!(std::fs::read_to_string(asr)
                 .unwrap()
@@ -176,11 +158,7 @@ mod tests {
                 .unwrap();
         assert_eq!(organized.source, "明天下午两点开会");
         assert_eq!(organized.text, "明天下午两点开会。");
-        let debug = std::fs::read_to_string(path.with_extension("debug.json")).unwrap();
-        assert!(!debug.contains("test-secret"));
-        let debug: RewriteDebug = serde_json::from_str(&debug).unwrap();
-        assert_eq!(debug.input, organized.source);
-        assert_eq!(debug.model, "test-rewriter");
+        assert!(!path.with_extension("debug.json").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -207,10 +185,7 @@ mod tests {
         assert_eq!(result.text, "原文");
         assert!(result.notice.contains("ASR 原文"));
         assert_eq!(std::fs::read(&path).unwrap(), b"original audio");
-        let debug = std::fs::read_to_string(path.with_extension("debug.json")).unwrap();
-        assert!(!debug.contains("secret-key"));
-        assert!(debug.contains("[REDACTED]"));
-        assert!(debug.contains("原文"));
+        assert!(!path.with_extension("debug.json").exists());
         assert!(!path.with_extension("polish.json").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }

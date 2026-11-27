@@ -4,6 +4,7 @@ pub use download::{download_whisper, is_managed_whisper, whisper_runtime, Whispe
 use crate::{
     config::Config,
     engines::{OpenAIEngine, RUNTIME},
+    model_load::ModelLoad,
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -220,6 +221,7 @@ pub fn selected_label(config: &Config) -> String {
                     .map_or_else(|| format!("{id}（未找到模型包）"), |pack| pack.label)
             },
         ),
+        "autodl" => crate::engines::AUTODL_ASR_MODEL.into(),
         "remote" => config.engine.remote.label(),
         "openai" => config.engine.openai.model.clone(),
         "volc_bigmodel" => "火山引擎".into(),
@@ -228,20 +230,34 @@ pub fn selected_label(config: &Config) -> String {
 }
 
 pub fn activate(pack: &Pack) -> Result<OpenAIEngine, String> {
-    MANAGER.lock().activate(pack, &QUITTING)
+    MANAGER.lock().activate(pack, &QUITTING, None)
+}
+
+pub fn activate_cancellable(pack: &Pack, load: &ModelLoad) -> Result<OpenAIEngine, String> {
+    MANAGER.lock().activate(pack, &QUITTING, Some(load))
 }
 
 pub fn ready_engine(config: &Config) -> Result<OpenAIEngine, String> {
+    ready_engine_inner(config, None)
+}
+
+pub fn ready_engine_cancellable(config: &Config, load: &ModelLoad) -> Result<OpenAIEngine, String> {
+    ready_engine_inner(config, Some(load))
+}
+
+fn ready_engine_inner(config: &Config, load: Option<&ModelLoad>) -> Result<OpenAIEngine, String> {
     let id = selected_id(config).ok_or("请先选择本地模型包。")?;
     let mut manager = MANAGER.lock();
+    load.map_or(Ok(()), ModelLoad::check)?;
     if let Some(engine) = manager.running_engine(id)? {
+        load.map_or(Ok(()), ModelLoad::complete)?;
         return Ok(engine);
     }
     let pack = list()?
         .into_iter()
         .find(|pack| pack.id == id)
         .ok_or_else(|| format!("找不到本地模型包 {id}，请检查 packs 目录。"))?;
-    manager.activate(&pack, &QUITTING)
+    manager.activate(&pack, &QUITTING, load)
 }
 
 pub fn release() -> Result<(), String> {
@@ -274,14 +290,26 @@ impl Manager {
         Ok(None)
     }
 
-    fn activate(&mut self, pack: &Pack, quitting: &AtomicBool) -> Result<OpenAIEngine, String> {
-        if quitting.load(Ordering::Relaxed) {
-            return Err("Speaky 正在退出。".into());
-        }
+    fn activate(
+        &mut self,
+        pack: &Pack,
+        quitting: &AtomicBool,
+        load: Option<&ModelLoad>,
+    ) -> Result<OpenAIEngine, String> {
+        let check = || {
+            if quitting.load(Ordering::Relaxed) {
+                Err("Speaky 正在退出。".into())
+            } else {
+                load.map_or(Ok(()), ModelLoad::check)
+            }
+        };
+        check()?;
         if let Some(engine) = self.running_engine(&pack.id)? {
+            load.map_or(Ok(()), ModelLoad::complete)?;
             return Ok(engine);
         }
         let executable = pack.executable()?;
+        check()?;
         self.release()?;
 
         let reservation = TcpListener::bind((HOST, 0)).map_err(|e| e.to_string())?;
@@ -318,20 +346,29 @@ impl Manager {
             .timeout(Duration::from_secs(1))
             .build()
             .map_err(|e| e.to_string())?;
+        check()?;
         drop(reservation);
         let mut process = Process::spawn(&mut command)
             .map_err(|e| format!("无法启动本地模型包 {}：{e}", pack.label))?;
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
-            if quitting.load(Ordering::Relaxed) {
-                return Err("Speaky 正在退出。".into());
-            }
+            check()?;
             if let Some(status) = process.child.try_wait().map_err(|e| e.to_string())? {
                 return Err(format!("本地模型包 {} 提前退出（{status}）。", pack.label));
             }
-            if RUNTIME
-                .block_on(async { client.get(&health).send().await })
-                .is_ok_and(|r| r.status().is_success())
+            let ready = RUNTIME.block_on(async {
+                let probe = client.get(&health).send();
+                let response = match load {
+                    Some(load) => tokio::select! {
+                        response = probe => Some(response),
+                        _ = load.cancelled() => None,
+                    },
+                    None => Some(probe.await),
+                };
+                response.is_some_and(|result| result.is_ok_and(|r| r.status().is_success()))
+            });
+            check()?;
+            if ready
                 && process
                     .child
                     .try_wait()
@@ -352,6 +389,8 @@ impl Manager {
             Duration::from_secs(3600),
         )
         .with_vocabulary_prompt(pack.manifest.use_vocabulary_prompt);
+        check()?;
+        load.map_or(Ok(()), ModelLoad::complete)?;
         self.active = Some(ActivePack {
             id: pack.id.clone(),
             process,
@@ -675,10 +714,12 @@ mod tests {
                 crate::engines::TranscriptionPass::Final,
             )
         };
-        let first_engine = manager.activate(&first, &quitting).unwrap();
+        let first_engine = manager.activate(&first, &quitting, None).unwrap();
         assert_eq!(transcribe(&first_engine).unwrap(), "first");
         let first_pid = manager.active.as_ref().unwrap().process.child.id();
-        manager.activate(&first, &quitting).unwrap();
+        let reused = ModelLoad::default();
+        manager.activate(&first, &quitting, Some(&reused)).unwrap();
+        assert!(!reused.cancel());
         assert_eq!(
             manager.active.as_ref().unwrap().process.child.id(),
             first_pid
@@ -687,7 +728,16 @@ mod tests {
         data["id"] = json!("second");
         data["env"]["SPEAKY_TEST_MODEL"] = json!("second");
         let second = load(&dir.0, &data).unwrap().unwrap();
-        let second_engine = manager.activate(&second, &quitting).unwrap();
+        let cancelled = ModelLoad::default();
+        assert!(cancelled.cancel());
+        assert!(manager
+            .activate(&second, &quitting, Some(&cancelled))
+            .is_err());
+        assert_eq!(
+            manager.active.as_ref().unwrap().process.child.id(),
+            first_pid
+        );
+        let second_engine = manager.activate(&second, &quitting, None).unwrap();
         assert_eq!(transcribe(&second_engine).unwrap(), "second");
         assert_ne!(
             first_pid,
@@ -703,10 +753,56 @@ mod tests {
         data["env"]["SPEAKY_TEST_MODEL"] = json!("exit");
         let broken = load(&dir.0, &data).unwrap().unwrap();
         assert!(manager
-            .activate(&broken, &quitting)
+            .activate(&broken, &quitting, None)
             .unwrap_err()
             .contains("提前退出"));
         assert!(manager.active.is_none());
+    }
+
+    #[test]
+    fn cancelling_a_pending_pack_stops_its_process_without_publishing_it() {
+        let dir = TempDir::new();
+        let mut data = manifest();
+        data["command"] = json!([
+            std::env::current_exe().unwrap(),
+            "--exact",
+            "model_packs::tests::mock_server",
+            "--skip={port}"
+        ]);
+        data["health_path"] = json!("/ready");
+        data["env"] = json!({
+            "SPEAKY_TEST_SERVER": "{host}:{port}",
+            "SPEAKY_TEST_PACK": "{pack_dir}",
+            "SPEAKY_TEST_MODEL": "loading",
+        });
+        let pack = load(&dir.0, &data).unwrap().unwrap();
+        let marker = dir.0.join("loading-address");
+        let loading = ModelLoad::default();
+        let quitting = AtomicBool::new(false);
+        let mut manager = Manager::default();
+        let address = std::thread::scope(|scope| {
+            let task = scope.spawn(|| manager.activate(&pack, &quitting, Some(&loading)));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let address = loop {
+                if let Ok(value) = fs::read_to_string(&marker) {
+                    if value.parse::<std::net::SocketAddr>().is_ok() {
+                        break Some(value);
+                    }
+                }
+                if task.is_finished() || Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert!(loading.cancel());
+            assert_eq!(
+                task.join().unwrap().unwrap_err(),
+                loading.check().unwrap_err()
+            );
+            address.expect("pack received a readiness probe before cancellation")
+        });
+        assert!(manager.active.is_none());
+        assert!(std::net::TcpStream::connect(address).is_err());
     }
 
     // Reuse this test executable as a portable HTTP server fixture.
@@ -726,7 +822,7 @@ mod tests {
         );
         assert!(std::env::args()
             .any(|arg| arg == format!("--skip={}", address.split_once(':').unwrap().1)));
-        let listener = TcpListener::bind(address).unwrap();
+        let listener = TcpListener::bind(&address).unwrap();
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             stream
@@ -748,7 +844,12 @@ mod tests {
             let mut payload = vec![0; length];
             reader.read_exact(&mut payload).unwrap();
             let (status, body) = if request.starts_with("GET /ready ") {
-                (200, "")
+                if model == "loading" {
+                    fs::write(pack.join("loading-address"), &address).unwrap();
+                    (503, "")
+                } else {
+                    (200, "")
+                }
             } else if request.starts_with("POST /api/audio/transcriptions ")
                 && String::from_utf8_lossy(&payload).contains("测试词")
             {

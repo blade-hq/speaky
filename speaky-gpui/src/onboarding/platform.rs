@@ -6,7 +6,7 @@ pub(super) const MICROPHONE_SETTINGS: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
 
 #[cfg(windows)]
-pub(super) fn motion_allowed() -> bool {
+pub(crate) fn motion_allowed() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION,
     };
@@ -86,13 +86,15 @@ mod apple {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) use apple::{microphone_permission, motion_allowed};
+pub(super) use apple::microphone_permission;
+#[cfg(target_os = "macos")]
+pub(crate) use apple::motion_allowed;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(super) const MICROPHONE_SETTINGS: &str = "";
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub(super) fn motion_allowed() -> bool {
+pub(crate) fn motion_allowed() -> bool {
     false
 }
 

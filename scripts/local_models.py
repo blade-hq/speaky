@@ -17,6 +17,8 @@ import time
 import urllib.error
 import urllib.request
 
+from gpu_worker import LoadCancelled, check_load
+
 ROOT = Path(__file__).resolve().parent.parent
 QWEN_SIZES = {1024: "Qwen3-ASR-0.6B", 2048: "Qwen3-ASR-1.7B"}
 SENSE = "SenseVoiceSmall-FP32"
@@ -118,15 +120,41 @@ def wait_handle(handle, millis):
 
 
 @contextlib.contextmanager
-def startup_lock(owner):
+def load_cancellation(owner, cancel_id):
+    if cancel_id is None:
+        yield None
+        return
+    if (not isinstance(cancel_id, str) or len(cancel_id) != 32
+            or any(c not in "0123456789abcdef" for c in cancel_id)):
+        raise ValueError("模型加载标识无效。")
+    name = f"Local\\SpeakyLoad-{owner}-{cancel_id}"
+    handle = winfunc("OpenEventW", wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)(
+        0x00100000, False, name)
+    if not handle:
+        raise RuntimeError("无法连接模型加载的取消信号。")
+    try:
+        yield lambda: wait_handle(handle, 0) == 0
+    finally:
+        close_handle(handle)
+
+
+@contextlib.contextmanager
+def startup_lock(owner, cancelled=None):
     mutex = winfunc("CreateMutexW", wintypes.HANDLE, ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)(
         None, False, f"Local\\SpeakyLocalASR-{owner}")
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        if wait_handle(mutex, 45000) not in (0, 0x80):
+        deadline = time.monotonic() + 45
+        while True:
+            check_load(cancelled)
+            status = wait_handle(mutex, 45000 if cancelled is None else 100)
+            if status != 258 or time.monotonic() >= deadline:
+                break
+        if status not in (0, 0x80):
             raise RuntimeError("等待本地识别服务超时。")
         try:
+            check_load(cancelled)
             yield
         finally:
             winfunc("ReleaseMutex", wintypes.BOOL, wintypes.HANDLE)(mutex)
@@ -154,44 +182,71 @@ def connection(state, owner):
     return None
 
 
-def ensure(model, owner, catalog):
+def ensure(model, owner, catalog, cancel_id=None):
     if owner <= 0 or (model is not None and model not in catalog):
         raise ValueError("当前未找到所选模型的权重或运行程序，请刷新模型列表。")
     profile = Path(os.environ.get("SPEAKY_CONFIG_DIR") or Path(os.environ["APPDATA"]) / "speaky/gpui")
     profile.mkdir(parents=True, exist_ok=True)
     state = profile / f"local-asr-{owner}.json"
-    with startup_lock(owner):
+    with load_cancellation(owner, cancel_id) as cancelled:
+        address = model_service(state, owner, model, cancelled)
+        check_load(cancelled)
+        if address is None:
+            return {"released": True}
+        return prepare_service(address, model, cancel_id)
+
+
+def model_service(state, owner, model, cancelled):
+    with startup_lock(owner, cancelled):
         address = connection(state, owner)
-        if not address:
-            if model is None:
-                return {"released": True}
-            # The service owns its socket. A second GUI can select a free port independently.
-            log_path = profile / f"local-asr-{owner}.log"
-            with log_path.open("w", encoding="utf-8") as log:
-                child = subprocess.Popen([sys.executable, "-B", "-X", "utf8", __file__, "Serve",
-                                          "--owner", str(owner), "--state", str(state)],
-                                         stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                         creationflags=subprocess.CREATE_NO_WINDOW)
-            deadline = time.monotonic() + 35
+        if address or model is None:
+            return address
+        check_load(cancelled)
+        # The service owns its socket. A second GUI can select a free port independently.
+        log_path = state.with_suffix(".log")
+        with log_path.open("w", encoding="utf-8") as log:
+            child = subprocess.Popen([sys.executable, "-B", "-X", "utf8", __file__, "Serve",
+                                      "--owner", str(owner), "--state", str(state)],
+                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
+        deadline = time.monotonic() + 35
+        try:
             while time.monotonic() < deadline and child.poll() is None:
+                check_load(cancelled)
                 try:
                     address = connection(state, owner)
                 except RuntimeError:
                     address = None  # Service has published its port and is starting HTTP.
                 if address:
-                    break
+                    check_load(cancelled)
+                    return address
                 time.sleep(0.12)
-            if not address:
-                raise RuntimeError(f"无法启动本地识别服务，请检查 Python 运行环境。日志：{log_path}")
+            check_load(cancelled)
+        except LoadCancelled:
+            # No preparation request was sent. Only this newly spawned manager is ours to stop.
+            child.terminate()
+            child.wait(timeout=5)
+            try:
+                if json.loads(state.read_bytes()).get("service_pid") == child.pid:
+                    state.unlink(missing_ok=True)
+            except (FileNotFoundError, ValueError):
+                pass
+            raise
+        raise RuntimeError(f"无法启动本地识别服务，请检查 Python 运行环境。日志：{log_path}")
+
+
+def prepare_service(address, model, cancel_id):
     url, instance = address
     try:
-        request_json(url + "/local/prepare", {"model": model, "instance": instance}, timeout=300)
+        result = request_json(url + "/local/prepare", {"model": model, "instance": instance,
+                                                       "cancel_id": cancel_id}, timeout=300)
     except urllib.error.HTTPError as error:
         raise RuntimeError(json.load(error).get("detail", str(error))) from error
     if model is None:
         return {"released": True}
     supports_prompt = model.startswith("Qwen3-ASR-") or model in WHISPER_MODELS
-    return {"id": model, "base_url": url + "/v1", "use_vocabulary_prompt": supports_prompt}
+    return {"id": model, "base_url": url + "/v1", "use_vocabulary_prompt": supports_prompt,
+            "started": result.get("started", False)}
 
 
 class PreviewSuperseded(Exception):
@@ -209,7 +264,7 @@ class Recognizers:
         self._preview_worker = None
 
     @contextlib.contextmanager
-    def gpu_slot(self, preview=False):
+    def gpu_slot(self, preview=False, cancelled=None):
         with self._gpu_ready:
             if preview:
                 if self._gpu_busy or self._priority_waiters:
@@ -224,7 +279,10 @@ class Recognizers:
                 try:
                     if self._preview_worker is not None:
                         self._preview_worker.preview_cancelled.set()
-                    self._gpu_ready.wait_for(lambda: not self._gpu_busy)
+                    while self._gpu_busy:
+                        check_load(cancelled)
+                        self._gpu_ready.wait(None if cancelled is None else 0.1)
+                    check_load(cancelled)
                 finally:
                     self._priority_waiters -= 1
             self._gpu_busy = True
@@ -253,16 +311,20 @@ class Recognizers:
             self.free_after_release = worker.free_after_stop()
             self.worker = None
 
-    def prepare(self, name):
+    def prepare(self, name, cancelled=None):
         from gpu_worker import Worker
+        check_load(cancelled)
         catalog = discover() if name is not None else {}
         if name is not None and name not in catalog:
             raise ValueError("模型文件已移动，请重新选择。")
         if self.worker is not None and self.worker.name == name and self.worker.process.is_alive():
-            return
+            return False
+        check_load(cancelled)
         self.release()
         if name is not None:
-            self.worker = Worker(name, catalog[name])
+            self.worker = Worker(name, catalog[name], cancelled)
+            return True
+        return False
 
     def transcribe(self, name, samples, rate, lang, prompt, preview=False):
         worker = self.worker
@@ -298,12 +360,13 @@ def serve(owner, state):
     def prepare(payload: dict = Body(...)):
         if payload.get("instance") != token:
             raise HTTPException(403, "Invalid instance")
-        with models.gpu_slot():
-            try:
-                models.prepare(payload["model"])
-            except Exception as error:
-                raise HTTPException(503, str(error)) from error
-        return {"ready": True}
+        try:
+            with load_cancellation(owner, payload.get("cancel_id")) as cancelled:
+                with models.gpu_slot(cancelled=cancelled):
+                    started = models.prepare(payload["model"], cancelled)
+        except Exception as error:
+            raise HTTPException(503, str(error)) from error
+        return {"ready": True, "started": started}
 
     @app.post("/v1/audio/transcriptions")
     def transcribe(file: UploadFile = File(...), model: str = Form(...), language: str = Form("auto"),
@@ -384,6 +447,7 @@ def main():
     parser.add_argument("--owner", type=int)
     parser.add_argument("--model")
     parser.add_argument("--state", type=Path)
+    parser.add_argument("--cancel-id")
     args = parser.parse_args()
     if args.action == "Serve":
         serve(args.owner, args.state)
@@ -392,7 +456,7 @@ def main():
     if args.action == "List":
         result = [{"id": model, "label": model} for model in models]
     else:
-        result = ensure(args.model, args.owner, models)
+        result = ensure(args.model, args.owner, models, args.cancel_id)
     print(json.dumps(result, ensure_ascii=False))
 
 

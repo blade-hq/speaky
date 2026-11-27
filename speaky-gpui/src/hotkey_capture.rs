@@ -19,6 +19,7 @@ const CAPTURE_ID: usize = 0x5350;
 pub(crate) enum CaptureEvent {
     Preview(Option<Shortcut>),
     Chosen(Shortcut),
+    IncompleteChord,
 }
 
 #[derive(Default)]
@@ -60,8 +61,16 @@ impl Keys {
             } else {
                 self.held &= !(1 << index);
             }
-        } else if down && self.candidate.is_none_or(|(vk, _)| is_modifier(vk)) {
-            return self.preview(key, self.modifiers());
+        } else if self.candidate.is_none_or(|(vk, _)| is_modifier(vk)) {
+            if down {
+                return self.preview(key, self.modifiers());
+            }
+            if self.held != 0 {
+                // Windows can deliver only the release for a key consumed by
+                // another global shortcut. Do not save its modifier as a tap.
+                self.candidate = None;
+                return Some(CaptureEvent::IncompleteChord);
+            }
         }
         if !down && self.candidate.is_some_and(|(vk, _)| vk == key) {
             return self
@@ -206,5 +215,24 @@ mod tests {
         keys.input(0x14, true, false);
         assert!(matches!(keys.input(0x14, false, false),
             Some(CaptureEvent::Chosen(key)) if key.id() == "key:0:vk14"));
+    }
+
+    #[test]
+    fn unmatched_key_release_never_saves_the_chord_modifier() {
+        let mut keys = Keys::default();
+        assert!(matches!(
+            keys.input(0xa2, true, false),
+            Some(CaptureEvent::Preview(Some(_)))
+        ));
+        assert!(matches!(
+            keys.input(0x79, false, false),
+            Some(CaptureEvent::IncompleteChord)
+        ));
+        assert!(keys.input(0xa2, false, false).is_none());
+        keys.input(0xa2, true, false);
+        assert!(matches!(
+            keys.input(0xa2, false, false),
+            Some(CaptureEvent::Chosen(_))
+        ));
     }
 }
